@@ -45,7 +45,7 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-full min-h-screen bg-white dark:bg-zinc-950">
+    <div className="flex h-screen bg-white dark:bg-zinc-950">
       {/* Main chat column */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <header className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -88,7 +88,7 @@ export default function Home() {
       </div>
 
       {/* Trace timeline */}
-      <div className={`shrink-0 overflow-hidden transition-all ${traceOpen ? 'w-72' : 'w-10'}`}>
+      <div className={`flex h-full shrink-0 flex-col overflow-hidden transition-all ${traceOpen ? 'w-72' : 'w-10'}`}>
         <TraceTimeline
           events={state.traceEvents}
           segments={state.segments}
@@ -100,7 +100,7 @@ export default function Home() {
       </div>
 
       {/* Context inspector */}
-      <div className={`shrink-0 overflow-hidden transition-all ${contextOpen ? 'w-80' : 'w-10'}`}>
+      <div className={`flex h-full shrink-0 flex-col overflow-hidden transition-all ${contextOpen ? 'w-80' : 'w-10'}`}>
         <ContextInspector
           contextSnapshots={state.contextSnapshots}
           isOpen={contextOpen}

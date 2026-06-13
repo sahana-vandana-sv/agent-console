@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { ToolSegment } from '../../types/state';
 
 interface Props {
@@ -30,7 +30,11 @@ function JsonCollapse({ value, label }: { value: unknown; label: string }) {
   );
 }
 
-export function ToolCard({ segment, isActive, onClick }: Props) {
+/**
+ * memo: the card only needs to re-render when status or result changes (TOOL_RESULT).
+ * Without memo it re-renders on every TOKENS_BATCH dispatch during pre-tool streaming.
+ */
+export const ToolCard = memo(function ToolCard({ segment, isActive, onClick }: Props) {
   const isPending = segment.status === 'pending';
   const ref = useRef<HTMLDivElement>(null);
 
@@ -64,12 +68,13 @@ export function ToolCard({ segment, isActive, onClick }: Props) {
         <span className="font-mono text-xs font-semibold text-zinc-700 dark:text-zinc-300">
           {segment.toolName}
         </span>
+        {/* transition-colors animates the pending→done badge change over 300ms */}
         <span
-          className="ml-auto rounded-full px-2 py-0.5 text-xs font-medium"
-          style={{
-            background: isPending ? '#dbeafe' : '#dcfce7',
-            color:      isPending ? '#1d4ed8' : '#15803d',
-          }}
+          className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium transition-colors duration-300 ${
+            isPending
+              ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+              : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+          }`}
         >
           {isPending ? 'running…' : 'done'}
         </span>
@@ -84,4 +89,4 @@ export function ToolCard({ segment, isActive, onClick }: Props) {
       )}
     </div>
   );
-}
+});

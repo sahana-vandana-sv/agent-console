@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { TextSegment } from '../../types/state';
 
 interface Props {
@@ -7,7 +7,12 @@ interface Props {
   onClick: (segmentId: string) => void;
 }
 
-export function TextChunk({ segment, isActive, onClick }: Props) {
+/**
+ * memo: once a TextSegment is frozen (after TOOL_CALL), its props never change.
+ * Without memo every TOKENS_BATCH dispatch (post-tool streaming) would re-render
+ * every frozen TextChunk even though the output is identical.
+ */
+export const TextChunk = memo(function TextChunk({ segment, isActive, onClick }: Props) {
   const ref = useRef<HTMLParagraphElement>(null);
 
   // Scroll into view when the timeline activates this segment
@@ -30,4 +35,4 @@ export function TextChunk({ segment, isActive, onClick }: Props) {
       {segment.content}
     </p>
   );
-}
+});

@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
 import type { Segment } from '../../types/state';
 import { TextChunk } from './TextChunk';
 import { ToolCard } from './ToolCard';
@@ -15,12 +14,9 @@ interface Props {
 }
 
 export function StreamingChat({ segments, phase, activeSegmentId, onSegmentFocus }: Props) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  // Auto-scroll to bottom as new content arrives
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [segments]);
+  // Scroll is owned by page.tsx — the bottomRef lives inside the overflow-y-auto
+  // container there. A second scrollIntoView here would fire simultaneously on every
+  // TOKENS_BATCH dispatch, creating two competing smooth-scroll animations per frame.
 
   if (segments.length === 0) {
     return (
@@ -52,7 +48,6 @@ export function StreamingChat({ segments, phase, activeSegmentId, onSegmentFocus
           />
         ),
       )}
-      <div ref={bottomRef} />
     </div>
   );
 }

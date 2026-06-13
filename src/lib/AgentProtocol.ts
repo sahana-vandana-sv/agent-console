@@ -7,7 +7,6 @@ import { unsafeJsonParse } from './escape-hatch';
 const WS_URL            = 'ws://localhost:4747/ws';
 const BACKOFF           = [500, 1000, 2000, 4000, 10000] as const;
 const GAP_TIMEOUT_MS    = 3000;
-const TOKEN_BATCH_MS    = 16;
 // After RESUME, the server replays history but never continues execution.
 // STREAM_END may never arrive. Give up after this long and force-complete.
 const REPLAY_TIMEOUT_MS = 8000;
@@ -47,7 +46,10 @@ export class AgentProtocol {
 
   private tokenBatch: Array<{ seq: number; text: string }> = [];
   private tokenBatchStreamId = '';
-  private tokenBatchTimer: ReturnType<typeof setTimeout> | null = null;
+  // rAF id — null when no flush is pending. Using rAF (not setTimeout) means the
+  // batch flushes exactly once per browser paint frame, giving true per-frame
+  // incremental rendering rather than a coarse 16ms fixed interval.
+  private tokenBatchTimer: number | null = null;
 
   constructor(dispatch: (action: AgentAction) => void) {
     this.dispatch = dispatch;
@@ -85,7 +87,7 @@ export class AgentProtocol {
   destroy(): void {
     this.reconnectTimer  && clearTimeout(this.reconnectTimer);
     this.gapTimer        && clearTimeout(this.gapTimer);
-    this.tokenBatchTimer && clearTimeout(this.tokenBatchTimer);
+    this.tokenBatchTimer && cancelAnimationFrame(this.tokenBatchTimer);
     this.replayTimer     && clearTimeout(this.replayTimer);
     this.isReconnecting  = false;   // prevent stale flag on next connect()
     this.isReplaying     = false;
@@ -225,15 +227,18 @@ export class AgentProtocol {
       }
 
       case 'TOKEN': {
-        // Accumulate into batch; flush after ~16 ms
+        // Accumulate tokens into a batch and flush on the next animation frame.
+        // rAF aligns the flush with the browser's vsync, so each paint cycle shows
+        // all tokens that arrived since the last frame — true incremental rendering.
+        // Tokens that arrive mid-frame are grouped into one React dispatch → one commit.
         if (this.tokenBatchStreamId && this.tokenBatchStreamId !== msg.stream_id) {
-          // Stream ID changed mid-batch — flush immediately
+          // Stream ID changed mid-batch — flush immediately before starting new batch
           this.flushTokenBatch();
         }
         this.tokenBatch.push({ seq: msg.seq, text: msg.text });
         this.tokenBatchStreamId = msg.stream_id;
         if (this.tokenBatchTimer === null) {
-          this.tokenBatchTimer = setTimeout(() => this.flushTokenBatch(), TOKEN_BATCH_MS);
+          this.tokenBatchTimer = requestAnimationFrame(() => this.flushTokenBatch());
         }
         break;
       }
@@ -296,7 +301,7 @@ export class AgentProtocol {
 
   private flushTokenBatch(): void {
     if (this.tokenBatchTimer !== null) {
-      clearTimeout(this.tokenBatchTimer);
+      cancelAnimationFrame(this.tokenBatchTimer);
       this.tokenBatchTimer = null;
     }
     if (this.tokenBatch.length === 0) return;

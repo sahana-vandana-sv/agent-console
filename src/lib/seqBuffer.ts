@@ -3,7 +3,8 @@ import type { ServerMessage } from '../types/protocol';
 // Pure ordering buffer — no timers, no React.
 // AgentProtocol owns the 3 s gap timer and calls flush() on expiry.
 //
-// seq resets to 0 on each USER_MESSAGE turn; call reset() before the new turn.
+// Server seq starts at 1 per turn (++seq on a zero-initialised counter).
+// Call reset() before each new USER_MESSAGE turn.
 
 export interface SeqBuffer {
   /** Add a message. Returns in-order messages ready to dispatch (may be empty). */
@@ -19,7 +20,10 @@ export interface SeqBuffer {
 export function createSeqBuffer(): SeqBuffer {
   const buffer = new Map<number, ServerMessage>();
   const seen   = new Set<number>();
-  let nextExpected = 0;
+  // Server uses ++seq (pre-increment starting from 0), so the first message
+// always has seq=1. Starting nextExpected at 0 would stall the buffer forever
+// waiting for a seq=0 that never arrives. Start at 1 to match the server.
+let nextExpected = 1;
 
   function drainContiguous(): ServerMessage[] {
     const out: ServerMessage[] = [];
@@ -69,7 +73,7 @@ export function createSeqBuffer(): SeqBuffer {
     reset(): void {
       buffer.clear();
       seen.clear();
-      nextExpected = 0;
+      nextExpected = 1;   // server ++seq starts at 1, not 0
     },
 
     hasPending(): boolean {

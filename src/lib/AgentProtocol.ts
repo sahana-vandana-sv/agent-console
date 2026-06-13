@@ -101,6 +101,8 @@ export class AgentProtocol {
 
   private send(msg: ClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
+      // 📤 CLIENT → SERVER
+      console.log('%c📤 CLIENT→SERVER', 'color:#22c55e;font-weight:bold', msg);
       this.ws.send(JSON.stringify(msg));
     }
   }
@@ -150,7 +152,17 @@ export class AgentProtocol {
 
   private onMessage(raw: string): void {
     const msg = unsafeJsonParse(raw) as ServerMessage;
+    // 📥 SERVER → CLIENT (raw, before seq ordering)
+    console.log('%c📥 SERVER→CLIENT', 'color:#60a5fa;font-weight:bold', `seq=${msg.seq} type=${msg.type}`, msg);
     const ready = this.seqBuf.add(msg);
+
+    if (ready.length === 0) {
+      // 🕐 SEQ BUFFER: message held — waiting for gap to fill
+      console.log('%c🕐 SEQ BUFFER', 'color:#f59e0b;font-weight:bold', `seq=${msg.seq} HELD (gap — waiting for contiguous run)`);
+    } else if (ready.length > 1) {
+      // 🔓 SEQ BUFFER: multiple messages drained at once (chaos flush or gap filled)
+      console.log('%c🔓 SEQ BUFFER', 'color:#a78bfa;font-weight:bold', `DRAINED ${ready.length} messages: seqs=[${ready.map(m=>m.seq).join(',')}]`);
+    }
 
     for (const m of ready) {
       this.dispatchMessage(m);
@@ -238,7 +250,12 @@ export class AgentProtocol {
         this.tokenBatch.push({ seq: msg.seq, text: msg.text });
         this.tokenBatchStreamId = msg.stream_id;
         if (this.tokenBatchTimer === null) {
+          // 🎨 rAF ARMED: next browser paint will flush the token batch
+          console.log('%c🎨 rAF ARMED', 'color:#f472b6;font-weight:bold', `seq=${msg.seq} text="${msg.text}" — batch will flush at next paint`);
           this.tokenBatchTimer = requestAnimationFrame(() => this.flushTokenBatch());
+        } else {
+          // Token arrived before rAF fired — accumulated into same batch
+          console.log('%c➕ TOKEN ACCUMULATED', 'color:#fb923c', `seq=${msg.seq} text="${msg.text}" — batch size now ${this.tokenBatch.length}`);
         }
         break;
       }
@@ -246,6 +263,7 @@ export class AgentProtocol {
       case 'TOOL_CALL': {
         // Flush any pending tokens FIRST so the text segment is frozen at the
         // exact boundary before the tool card appears.
+        console.log('%c🔧 TOOL_CALL received', 'color:#f59e0b;font-weight:bold', `call_id=${msg.call_id} tool=${msg.tool_name} — flushing token batch first to freeze text`);
         this.flushTokenBatch();
         this.dispatch({
           type: 'TOOL_CALL',
@@ -261,7 +279,10 @@ export class AgentProtocol {
         // "unexpected TOOL_ACK" violations.
         if (!this.isReplaying) {
           const callId = msg.call_id;
-          setTimeout(() => this.send({ type: 'TOOL_ACK', call_id: callId }), 0);
+          setTimeout(() => {
+            console.log('%c✅ TOOL_ACK sent', 'color:#22c55e;font-weight:bold', `call_id=${callId}`);
+            this.send({ type: 'TOOL_ACK', call_id: callId });
+          }, 0);
         }
         break;
       }
@@ -305,6 +326,12 @@ export class AgentProtocol {
       this.tokenBatchTimer = null;
     }
     if (this.tokenBatch.length === 0) return;
+    // 🚀 rAF FIRED → dispatching TOKENS_BATCH to React reducer
+    console.log(
+      '%c🚀 rAF FLUSH → TOKENS_BATCH', 'color:#f472b6;font-weight:bold',
+      `${this.tokenBatch.length} token(s): "${this.tokenBatch.map(t=>t.text).join('')}"`,
+      `seqs=[${this.tokenBatch.map(t=>t.seq).join(',')}]`
+    );
     this.dispatch({
       type: 'TOKENS_BATCH',
       tokens: this.tokenBatch,

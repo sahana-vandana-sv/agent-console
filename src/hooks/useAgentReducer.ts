@@ -200,7 +200,7 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
       const traceEvents = addTraceEvent(state.traceEvents, {
         type: 'TOOL_RESULT',
         seq: -1,
-        payload: { callId: action.callId },
+        payload: { callId: action.callId, result: action.result },
       });
       // Only transition to STREAMING when ALL tool cards are resolved.
       // Chaos can fire two TOOL_CALLs before any TOOL_RESULT arrives — in that

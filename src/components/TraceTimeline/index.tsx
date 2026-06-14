@@ -253,10 +253,11 @@ export const TraceTimeline = memo(function TraceTimeline({
       if (searchFilter) {
         const haystack =
           row.kind === 'token_group'
-            ? `TOKEN ${row.totalTokens} ${row.segmentId ?? ''}`
+            // Search the actual streamed text + metadata
+            ? `TOKEN ${row.totalTokens} ${row.segmentId ?? ''} ${row.textContent ?? ''}`
             : JSON.stringify(
                 row.kind === 'tool_call' || row.kind === 'tool_result'
-                  ? row.event.payload
+                  ? row.event.payload   // includes result object now
                   : row.kind === 'other' ? row.event.payload : '',
               );
         if (!haystack.toLowerCase().includes(searchFilter.toLowerCase())) continue;

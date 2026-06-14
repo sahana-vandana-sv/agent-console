@@ -56,7 +56,7 @@ export type AgentAction =
   | { type: 'USER_MESSAGE_SENT' }
   | { type: 'WS_OPEN' }
   | { type: 'WS_CLOSE' }
-  | { type: 'TOKENS_BATCH'; tokens: Array<{ seq: number; text: string }>; streamId: string }
+  | { type: 'TOKENS_BATCH'; tokens: Array<{ seq: number; text: string }>; streamId: string; firstArrivalTs: number; lastArrivalTs: number }
   | { type: 'TOOL_CALL'; seq: number; callId: string; toolName: string; args: Record<string, unknown>; streamId: string }
   | { type: 'TOOL_RESULT'; callId: string; result: Record<string, unknown> }
   | { type: 'CONTEXT_SNAPSHOT'; seq: number; contextId: string; data: Record<string, unknown> }

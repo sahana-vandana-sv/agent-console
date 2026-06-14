@@ -64,6 +64,7 @@ function TypeBadge({ type }: { type: string }) {
 }
 
 function fmtMs(ms: number) {
+  if (ms === 0) return '<1ms';
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
@@ -130,9 +131,7 @@ export const TokenGroupRowView = memo(function TokenGroupRowView({
         <span className="flex-1 truncate text-zinc-600 dark:text-zinc-400">
           Streamed <strong className="text-zinc-800 dark:text-zinc-200">{row.totalTokens}</strong>{' '}
           tokens
-          {row.durationMs > 0 && (
-            <span className="ml-1 text-zinc-400">({fmtMs(row.durationMs)})</span>
-          )}
+          <span className="ml-1 text-zinc-400">({fmtMs(row.durationMs)})</span>
         </span>
         <button
           onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}

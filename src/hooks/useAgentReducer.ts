@@ -138,7 +138,7 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
       const traceEvents = addTraceEvent(state.traceEvents, {
         type: 'TOKEN',
         seq: maxSeq,
-        payload: { count: action.tokens.length, streamId: action.streamId, segmentId },
+        payload: { count: action.tokens.length, streamId: action.streamId, segmentId, firstArrivalTs: action.firstArrivalTs, lastArrivalTs: action.lastArrivalTs },
       });
       const nextPhase = state.phase === 'CONNECTED' || state.phase === 'RESUMING'
         ? 'STREAMING'

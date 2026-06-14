@@ -79,13 +79,19 @@ function buildDisplayRows(
       ? textSegments.find((s) => s.id === segmentId)
       : undefined;
 
+    // Streaming time = when the last token in this group arrived at the WebSocket
+    // minus when the first token arrived — measures actual server delivery time,
+    // not React processing time. Falls back to reducer timestamps if not present.
+    const firstArrival = (first.payload.firstArrivalTs as number | undefined) ?? first.timestamp;
+    const lastArrival  = (last.payload.lastArrivalTs   as number | undefined) ?? last.timestamp;
+
     rows.push({
       kind: 'token_group',
       id: first.id,
       events: tokenRun,
       totalTokens,
-      durationMs: last.timestamp - first.timestamp,
-      startTs: first.timestamp,
+      durationMs: lastArrival - firstArrival,
+      startTs: firstArrival,
       segmentId,
       textContent: matchedSeg?.content,
     });

@@ -46,6 +46,11 @@ export class AgentProtocol {
 
   private tokenBatch: Array<{ seq: number; text: string }> = [];
   private tokenBatchStreamId = '';
+  // Wall-clock time (Date.now()) when the first and last token of the current
+  // batch arrived at the WebSocket — before rAF delay. Used for accurate
+  // streaming-time display in the trace timeline.
+  private tokenBatchFirstArrivalTs = 0;
+  private tokenBatchLastArrivalTs  = 0;
   // rAF id — null when no flush is pending. Using rAF (not setTimeout) means the
   // batch flushes exactly once per browser paint frame, giving true per-frame
   // incremental rendering rather than a coarse 16ms fixed interval.
@@ -247,6 +252,11 @@ export class AgentProtocol {
           // Stream ID changed mid-batch — flush immediately before starting new batch
           this.flushTokenBatch();
         }
+        const now = Date.now();
+        if (this.tokenBatch.length === 0) {
+          this.tokenBatchFirstArrivalTs = now;   // first token of this batch
+        }
+        this.tokenBatchLastArrivalTs = now;      // updated on every arrival
         this.tokenBatch.push({ seq: msg.seq, text: msg.text });
         this.tokenBatchStreamId = msg.stream_id;
         if (this.tokenBatchTimer === null) {
@@ -336,8 +346,12 @@ export class AgentProtocol {
       type: 'TOKENS_BATCH',
       tokens: this.tokenBatch,
       streamId: this.tokenBatchStreamId,
+      firstArrivalTs: this.tokenBatchFirstArrivalTs,
+      lastArrivalTs:  this.tokenBatchLastArrivalTs,
     });
     this.tokenBatch = [];
-    this.tokenBatchStreamId = '';
+    this.tokenBatchStreamId      = '';
+    this.tokenBatchFirstArrivalTs = 0;
+    this.tokenBatchLastArrivalTs  = 0;
   }
 }

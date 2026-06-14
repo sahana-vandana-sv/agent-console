@@ -24,6 +24,15 @@ export type ToolCallRow = {
   event: TraceEvent;
   callId: string;
   toolName: string;
+  /** TOOL_RESULT event for the same callId — attached here so the pair always renders together */
+  resultEvent?: TraceEvent;
+  /**
+   * Set by filter logic to control which sub-row renders:
+   * - 'both'   (default) → show TOOL_CALL + TOOL_RESULT together
+   * - 'call'   → show only the TOOL_CALL half (TOOL_RESULT filter hides it)
+   * - 'result' → show only the TOOL_RESULT half (TOOL_CALL filter hides it)
+   */
+  visiblePart?: 'both' | 'call' | 'result';
 };
 
 export type ToolResultRow = {
@@ -181,16 +190,48 @@ export const ToolCallRowView = memo(function ToolCallRowView({
   onFocus,
   rowRef,
 }: ToolCallProps) {
+  const hasResult = row.resultEvent !== undefined;
+  const part = row.visiblePart ?? 'both';
+  const showCall   = part === 'both' || part === 'call';
+  const showResult = (part === 'both' || part === 'result') && hasResult;
+  // When showing only the result half, the ┬/└ connector is meaningless — use plain indent
+  const connectorGlyph = part === 'result' ? '└' : (hasResult && part === 'both' ? '┬' : null);
+
   return (
-    <RowWrapper isActive={isActive} onClick={() => onFocus(row.callId)} rowRef={rowRef}>
-      <TypeBadge type="TOOL_CALL" />
-      <span className="flex-1 truncate font-mono text-zinc-700 dark:text-zinc-300">
-        {row.toolName}
-      </span>
-      <span className="shrink-0 truncate font-mono text-[9px] text-zinc-400 dark:text-zinc-500">
-        {row.callId.slice(0, 8)}
-      </span>
-    </RowWrapper>
+    <div ref={rowRef} className={`border-b text-xs ${isActive ? 'border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-900/30' : 'border-zinc-100 dark:border-zinc-800'}`}>
+      {/* TOOL_CALL row */}
+      {showCall && (
+        <div
+          className="flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+          onClick={() => onFocus(row.callId)}
+        >
+          {/* Connector glyph — ┬ when paired with result, nothing otherwise */}
+          <span className={`shrink-0 font-mono text-zinc-300 dark:text-zinc-600 ${connectorGlyph && part === 'both' && hasResult ? 'opacity-100' : 'opacity-0'}`}>
+            ┬
+          </span>
+          <TypeBadge type="TOOL_CALL" />
+          <span className="flex-1 truncate font-mono text-zinc-700 dark:text-zinc-300">
+            {row.toolName}
+          </span>
+          <span className="shrink-0 truncate font-mono text-[9px] text-zinc-400 dark:text-zinc-500">
+            {row.callId.slice(0, 8)}
+          </span>
+        </div>
+      )}
+      {/* TOOL_RESULT — always adjacent when showing 'both', standalone when showing 'result' only */}
+      {showResult && (
+        <div
+          className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60 ${showCall ? 'border-t border-zinc-100 dark:border-zinc-800' : ''}`}
+          onClick={() => onFocus(row.callId)}
+        >
+          <span className="shrink-0 font-mono text-zinc-300 dark:text-zinc-600">└</span>
+          <TypeBadge type="TOOL_RESULT" />
+          <span className="truncate font-mono text-[9px] text-zinc-400 dark:text-zinc-500">
+            {row.callId.slice(0, 8)}
+          </span>
+        </div>
+      )}
+    </div>
   );
 });
 

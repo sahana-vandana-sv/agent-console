@@ -9,6 +9,7 @@ import {
   ToolResultRowView,
   OtherRowView,
   type DisplayRow,
+  type ToolCallRow,
 } from './TimelineRow';
 
 interface Props {
@@ -58,6 +59,10 @@ function buildDisplayRows(
 ): DisplayRow[] {
   const rows: DisplayRow[] = [];
   let tokenRun: TraceEvent[] | null = null;
+  // Pending tool call rows keyed by callId — waiting for their matching TOOL_RESULT.
+  // Events that arrive between TOOL_CALL and TOOL_RESULT are held in interstitialBuffer
+  // and flushed into rows AFTER the paired tool_call row is finalised.
+  const pendingToolCalls = new Map<string, { rowIndex: number; interstitial: TraceEvent[] }>();
 
   const flushTokenRun = () => {
     if (!tokenRun || tokenRun.length === 0) return;
@@ -105,26 +110,57 @@ function buildDisplayRows(
     } else {
       flushTokenRun();
       if (ev.type === 'TOOL_CALL') {
+        const callId = (ev.payload.callId as string) ?? '';
+        const rowIndex = rows.length;
         rows.push({
           kind: 'tool_call',
           id: ev.id,
           event: ev,
-          callId:   (ev.payload.callId as string) ?? '',
+          callId,
           toolName: (ev.payload.toolName as string) ?? '',
         });
+        // Register as pending — interstitial events (PING/PONG etc.) will be buffered
+        pendingToolCalls.set(callId, { rowIndex, interstitial: [] });
       } else if (ev.type === 'TOOL_RESULT') {
-        rows.push({
-          kind: 'tool_result',
-          id: ev.id,
-          event: ev,
-          callId: (ev.payload.callId as string) ?? '',
-        });
+        const callId = (ev.payload.callId as string) ?? '';
+        const pending = pendingToolCalls.get(callId);
+        if (pending) {
+          // Attach result directly onto the call row so they always render together
+          (rows[pending.rowIndex] as ToolCallRow).resultEvent = ev;
+          pendingToolCalls.delete(callId);
+          // Flush buffered interstitial events (PING/PONG etc.) AFTER the pair
+          for (const ie of pending.interstitial) {
+            rows.push({ kind: 'other', id: ie.id, event: ie });
+          }
+        } else {
+          // Orphaned TOOL_RESULT (e.g. after reconnect replay) — render standalone
+          rows.push({
+            kind: 'tool_result',
+            id: ev.id,
+            event: ev,
+            callId,
+          });
+        }
       } else {
-        rows.push({ kind: 'other', id: ev.id, event: ev });
+        // Check if this event arrives between a TOOL_CALL and its TOOL_RESULT
+        const activePending = [...pendingToolCalls.values()];
+        if (activePending.length > 0) {
+          // Buffer it — emit after the tool pair is complete
+          activePending[activePending.length - 1]!.interstitial.push(ev);
+        } else {
+          rows.push({ kind: 'other', id: ev.id, event: ev });
+        }
       }
     }
   }
   flushTokenRun();
+  // Flush interstitial events for any tool calls still awaiting their TOOL_RESULT
+  // (mid-stream snapshot — result hasn't arrived yet)
+  for (const { interstitial } of pendingToolCalls.values()) {
+    for (const ie of interstitial) {
+      rows.push({ kind: 'other', id: ie.id, event: ie });
+    }
+  }
   return rows;
 }
 
@@ -189,16 +225,31 @@ export const TraceTimeline = memo(function TraceTimeline({
 
   // Filtering
   const filteredRows = useMemo(() => {
-    return allRows.filter((row) => {
+    const result: DisplayRow[] = [];
+    for (const row of allRows) {
+      // ── Type filter ──────────────────────────────────────────────────────
       if (typeFilter !== 'ALL') {
-        const rowType =
-          row.kind === 'token_group'  ? 'TOKEN'
-          : row.kind === 'tool_call'  ? 'TOOL_CALL'
-          : row.kind === 'tool_result'? 'TOOL_RESULT'
-          : row.kind === 'other'      ? row.event.type
-          : '';
-        if (rowType !== typeFilter) return false;
+        if (row.kind === 'token_group' && typeFilter !== 'TOKEN') continue;
+        if (row.kind === 'other' && row.event.type !== typeFilter) continue;
+        if (row.kind === 'tool_result' && typeFilter !== 'TOOL_RESULT') continue;
+
+        if (row.kind === 'tool_call') {
+          const wantCall   = typeFilter === 'TOOL_CALL';
+          const wantResult = typeFilter === 'TOOL_RESULT' && row.resultEvent !== undefined;
+          if (!wantCall && !wantResult) continue;
+          // Clone row with visibility hint so ToolCallRowView renders only the right half
+          const visiblePart: 'call' | 'result' = wantCall ? 'call' : 'result';
+          // ── Search filter (applied inside type-filter branch for tool_call)
+          if (searchFilter) {
+            const haystack = JSON.stringify(row.event.payload);
+            if (!haystack.toLowerCase().includes(searchFilter.toLowerCase())) continue;
+          }
+          result.push({ ...row, visiblePart });
+          continue;
+        }
       }
+
+      // ── Search filter (non-tool-call paths) ─────────────────────────────
       if (searchFilter) {
         const haystack =
           row.kind === 'token_group'
@@ -208,10 +259,12 @@ export const TraceTimeline = memo(function TraceTimeline({
                   ? row.event.payload
                   : row.kind === 'other' ? row.event.payload : '',
               );
-        if (!haystack.toLowerCase().includes(searchFilter.toLowerCase())) return false;
+        if (!haystack.toLowerCase().includes(searchFilter.toLowerCase())) continue;
       }
-      return true;
-    });
+
+      result.push(row);
+    }
+    return result;
   }, [allRows, typeFilter, searchFilter]);
 
   // Active row — works in both directions:

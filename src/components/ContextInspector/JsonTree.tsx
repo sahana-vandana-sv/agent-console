@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { startTransition, useState } from 'react';
 
 interface Props {
   data: Record<string, unknown>;
@@ -38,7 +38,7 @@ function JsonNode({ nodeKey, value, highlighted }: {
     <div className={`py-0.5 ${highlighted ? 'bg-yellow-100 dark:bg-yellow-900/30' : ''}`}>
       <button
         className="flex w-full items-start gap-1 text-left"
-        onClick={() => isObject && setExpanded((v) => !v)}
+        onClick={() => isObject && startTransition(() => setExpanded((v) => !v))}
       >
         <span className="text-violet-600 dark:text-violet-400">{nodeKey}</span>
         <span className="text-zinc-400">:</span>

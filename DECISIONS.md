@@ -209,6 +209,89 @@ In both cases the server records a violation after 2s. There is no mechanism for
 
 ---
 
+## JSON Diff and Tree Rendering — Core Concepts
+
+### Why top-level diff, not recursive diff
+
+The choice to diff only at the top level of the context snapshot object is not a shortcut — it is the correct scope for the information the UI needs to convey. The use cases are:
+
+- `report_summary`: snapshot 2 adds two keys (`current_focus`, `extracted_metrics`) at the root.
+- `large_context`: snapshot 2 adds two keys (`analysis_complete`, `flagged_issues`) at the root.
+
+In both cases the change is at the root. Recursive diff would visit thousands of nested nodes (64 tables × columns × properties) at a cost of O(n total nodes), returning no additional information for the UI. `Object.keys()` is O(n top-level keys) — a single linear pass.
+
+The leaf-level insight: the diff result's only job is to produce `{ added, removed, changed }` arrays of key names and their values. The values themselves are displayed lazily in the tree. You never need to diff inside a value to display the top-level diff summary.
+
+### The value equality problem — tiered strategy
+
+Reference equality alone (`===`) produces false positives for parsed JSON. `JSON.parse()` always returns new object instances. The server's `generateLargeContext()` is called twice (once per snapshot), so all 64 table values have new references even though the content is identical.
+
+The resolution uses a tiered strategy — cheapest check first, most expensive last:
+
+1. **Reference equality** — `a === b`: instant. Handles primitive values (strings, numbers, booleans) and any genuinely cached object.
+2. **Type guard** — `typeof a !== typeof b`, null checks: O(1) fast reject for mismatched types.
+3. **Array length check** — `a.length !== b.length`: O(1) reject before serialisation.
+4. **`JSON.stringify` deep equality** — called only as a fallback for objects that pass all prior checks.
+
+Critically, `JSON.stringify` is called **per top-level key**, never on the whole 550KB object. At ~1 GB/s serialisation throughput, an 8KB table value takes ~0.008ms. 64 tables = ~0.5ms total. The diff is memoised on seq numbers so this runs exactly once per snapshot pair — not on every render.
+
+This is cheaper than a custom recursive comparator because `JSON.stringify` is a native C++ function in V8, not JavaScript recursion with property descriptor lookups.
+
+### Why lazy tree mounting (not virtualisation)
+
+Two approaches prevent a 550KB JSON tree from freezing the tab:
+
+- **Virtual scroll**: mount only the DOM nodes in the visible window. All nodes exist logically; only visible ones are in the DOM.
+- **Lazy expand**: nodes are collapsed by default; children are never mounted until the user clicks.
+
+Lazy expand is the right choice here because the tree is navigated by user intent (clicking to explore a specific table), not by scrolling linearly through all entries. A user looking at `users_table` never needs `orders_table` mounted. Virtual scroll would still mount `orders_table` if the user scrolled past it, then unmount it on scroll-away — wasteful for a tree that most users never fully traverse.
+
+The implementation consequence: `{isExpanded && <children />}` — React simply does not mount child components when collapsed. No library dependency, no offset calculation, no layout measurement.
+
+### `startTransition` for non-blocking expand
+
+Clicking to expand a large node (e.g. a table with 200 columns) synchronously mounts hundreds of `JsonNode` components. Without yielding, this blocks the main thread during React's reconciliation pass — input events queue up, the click feels laggy, the browser may skip frames.
+
+`startTransition` marks the `setExpanded(true)` call as a *non-urgent* update. React can interrupt the expansion render between fibre work units to process higher-priority events (user input, animation frames). The expansion still completes; it just spreads across frames.
+
+```typescript
+onClick={() => startTransition(() => setExpanded(v => !v))}
+```
+
+The user-visible effect: the expand feels responsive (no frozen cursor) at the cost of appearing slightly incremental for very large subtrees. This is always preferable to a hard freeze.
+
+### Memoisation keyed on identity, not reference
+
+`ContextInspector` re-renders on every token dispatch because it receives `contextSnapshots` (a Map) from the top-level reducer state. React's referential equality check sees a new Map reference → triggers re-render → `jsonDiff` would run again.
+
+The fix: `useMemo([prevSnapshot?.seq, snapshot?.seq])`. Seq numbers are primitive integers stored in state alongside each snapshot. They only change when a new snapshot actually arrives — not when tokens stream. Primitive equality check is O(1) and stable across renders.
+
+```typescript
+const diff = useMemo(
+  () => jsonDiff(prevSnapshot.data, snapshot.data),
+  [prevSnapshot?.seq, snapshot?.seq]
+);
+```
+
+This makes `jsonDiff` run exactly N-1 times total (where N is the number of snapshots), regardless of how many token renders happen between snapshots.
+
+### Stable React keys preserve user expand state across snapshot updates
+
+When a new snapshot arrives, `snapshot.data` is a new object reference — a fresh `JSON.parse` result. Without stable keys, React would unmount and remount every `JsonNode`, resetting all `expanded` state. A user who opened `users_table` to inspect a column would find it collapsed again.
+
+Using the object key string as the React key (`key={nodeKey}`) means: as long as the key name exists in both the old and new snapshot, React reuses the same component instance. The `expanded` boolean in local state is preserved. Only genuinely new keys (from the diff's `added` list) get fresh component instances.
+
+### Diff result as metadata, not tree replacement
+
+The diff output — a flat list of `{ key, type }` entries — is passed into the tree as `highlightKeys: Set<string>`, not as a modified version of the data tree. The tree still renders from `snapshot.data`. The highlight is a display annotation.
+
+This separation means:
+- The tree structure is stable (same data, same keys, same component instances).
+- A diff arriving mid-stream does not cause the tree to re-mount or re-evaluate all nodes.
+- Adding `'changed'` and `'removed'` markers in future is additive — the tree component gains a `diffMarkers: Map<string, type>` prop without restructuring how it renders children.
+
+---
+
 ## What We Would Do Differently
 
 1. **Virtualise TraceTimeline** — Use `react-window` `FixedSizeList` for the event list. Group consecutive TOKEN events into a single collapsed row ("Streamed N tokens in Xs") to keep the visible count low.

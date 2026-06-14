@@ -15,8 +15,10 @@ export class AgentProtocol {
   private ws: WebSocket | null = null;
   private dispatch: (action: AgentAction) => void;
 
-  // Operational state — never triggers re-renders
-  private lastProcessedSeq  = 0;
+  // Ref supplied by useWebSocket — written synchronously on every React render,
+  // so it always holds the latest committed seq even if onOpen() fires before
+  // a useEffect callback would have had a chance to call updateLastProcessedSeq().
+  private lastProcessedSeqRef: { current: number };
   private isReconnecting    = false;
   private sessionStarted    = false;   // true only after first USER_MESSAGE
   // True from RESUME sent until STREAM_END (natural or timeout).
@@ -56,8 +58,12 @@ export class AgentProtocol {
   // incremental rendering rather than a coarse 16ms fixed interval.
   private tokenBatchTimer: number | null = null;
 
-  constructor(dispatch: (action: AgentAction) => void) {
+  constructor(
+    dispatch: (action: AgentAction) => void,
+    lastProcessedSeqRef: { current: number },
+  ) {
     this.dispatch = dispatch;
+    this.lastProcessedSeqRef = lastProcessedSeqRef;
   }
 
   // ─── Public API ────────────────────────────────────────────────────────────
@@ -73,8 +79,10 @@ export class AgentProtocol {
 
   sendUserMessage(content: string): void {
     this.sessionStarted = true;
-    // Reset seq tracking for the new turn BEFORE sending
-    this.lastProcessedSeq = 0;
+    // Reset seq tracking for the new turn BEFORE sending.
+    // The ref is owned by useWebSocket and will be reset to 0 when the
+    // USER_MESSAGE_SENT reducer action clears lastProcessedSeq in state.
+    // We don't mutate the ref here — the reducer owns the value.
     this.seqBuf.reset();
     this.clearGapTimer();
     this.clearReplayTimer();
@@ -84,12 +92,7 @@ export class AgentProtocol {
     this.send({ type: 'USER_MESSAGE', content });
   }
 
-  /** Called by useWebSocket to keep lastProcessedSeq in sync with the DOM. */
-  updateLastProcessedSeq(seq: number): void {
-    if (seq > this.lastProcessedSeq) this.lastProcessedSeq = seq;
-  }
-
-  destroy(): void {
+destroy(): void {
     this.reconnectTimer  && clearTimeout(this.reconnectTimer);
     this.gapTimer        && clearTimeout(this.gapTimer);
     this.tokenBatchTimer && cancelAnimationFrame(this.tokenBatchTimer);
@@ -117,7 +120,7 @@ export class AgentProtocol {
       // RESUME must be the very first message after a genuine mid-session reconnect.
       // Guard: only send if a USER_MESSAGE was ever sent — RESUME { last_seq: 0 }
       // on a pre-session drop is meaningless and noisy in the server log.
-      this.send({ type: 'RESUME', last_seq: this.lastProcessedSeq });
+      this.send({ type: 'RESUME', last_seq: this.lastProcessedSeqRef.current });
       this.dispatch({ type: 'RECONNECT_SUCCESS' });
       this.isReconnecting   = false;
       this.reconnectAttempt = 0;

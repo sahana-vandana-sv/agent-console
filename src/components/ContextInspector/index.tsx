@@ -18,10 +18,20 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
   const [activeCtx, setActiveCtx] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
 
-  const currentCtx = activeCtx ?? contextIds[0] ?? null;
+  // Validate activeCtx against the CURRENT map — it may be stale from a previous
+  // conversation turn (USER_MESSAGE_SENT resets the map but not local component state).
+  const currentCtx =
+    activeCtx !== null && contextSnapshots.has(activeCtx)
+      ? activeCtx
+      : contextIds[0] ?? null;
+
   const history = currentCtx ? (contextSnapshots.get(currentCtx) ?? []) : [];
-  const snapshot = history[activeIndex] ?? null;
-  const prevSnapshot = activeIndex > 0 ? history[activeIndex - 1] : null;
+
+  // Clamp activeIndex — guards against stale index when switching contexts or
+  // when a new turn resets the map to fewer snapshots than before.
+  const safeIndex = Math.min(activeIndex, Math.max(0, history.length - 1));
+  const snapshot = history[safeIndex] ?? null;
+  const prevSnapshot = safeIndex > 0 ? history[safeIndex - 1] : null;
 
   // Memoised diff — jsonDiff runs O(n top-level keys) but must NOT re-run on
   // every token render (streaming causes rapid re-renders). Key on seq numbers
@@ -31,8 +41,7 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
       prevSnapshot && snapshot
         ? jsonDiff(prevSnapshot.data, snapshot.data)
         : { added: [], removed: [], changed: [] },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [prevSnapshot?.seq, snapshot?.seq],
+    [prevSnapshot?.seq, snapshot?.seq], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const addedKeys = useMemo(
@@ -76,7 +85,7 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
             <>
               <HistoryScrubber
                 history={history}
-                activeIndex={activeIndex}
+                activeIndex={safeIndex}
                 onSelect={(i) => setActiveIndex(i)}
               />
               {prevSnapshot && <DiffView diff={diff} />}

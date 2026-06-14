@@ -58,7 +58,7 @@ export type AgentAction =
   | { type: 'WS_CLOSE' }
   | { type: 'TOKENS_BATCH'; tokens: Array<{ seq: number; text: string }>; streamId: string; firstArrivalTs: number; lastArrivalTs: number }
   | { type: 'TOOL_CALL'; seq: number; callId: string; toolName: string; args: Record<string, unknown>; streamId: string }
-  | { type: 'TOOL_RESULT'; callId: string; result: Record<string, unknown> }
+  | { type: 'TOOL_RESULT'; seq: number; callId: string; result: Record<string, unknown> }
   | { type: 'CONTEXT_SNAPSHOT'; seq: number; contextId: string; data: Record<string, unknown> }
   | { type: 'STREAM_END'; streamId: string }
   | { type: 'SEQ_GAP_DETECTED' }

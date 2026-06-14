@@ -213,6 +213,7 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
         phase: stillPending ? 'TOOL_PENDING' : 'STREAMING',
         segments,
         traceEvents,
+        lastProcessedSeq: Math.max(state.lastProcessedSeq, action.seq),
       };
     }
 

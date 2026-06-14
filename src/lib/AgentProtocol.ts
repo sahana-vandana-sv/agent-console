@@ -300,6 +300,7 @@ export class AgentProtocol {
       case 'TOOL_RESULT': {
         this.dispatch({
           type: 'TOOL_RESULT',
+          seq: msg.seq,
           callId: msg.call_id,
           result: msg.result,
         });

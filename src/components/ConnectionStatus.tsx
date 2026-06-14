@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { ConnectionPhase } from '../types/state';
 
 interface Props {
@@ -12,6 +13,27 @@ const BACKOFF_STEPS = [500, 1000, 2000, 4000, 10000];
 
 export function ConnectionStatus({ phase, reconnectAttempt }: Props) {
   const [countdown, setCountdown] = useState(0);
+
+  // Create a stable portal container synchronously on first client render —
+  // avoids the mounted-state race where a useState(false)→true cycle delays
+  // visibility by one render, which can be longer than a fast reconnect.
+  const portalRef = useRef<HTMLDivElement | null>(null);
+  if (typeof document !== 'undefined' && !portalRef.current) {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    portalRef.current = el;
+  }
+
+  // Remove the portal container when the component unmounts
+  useEffect(() => {
+    return () => {
+      if (portalRef.current) {
+        document.body.removeChild(portalRef.current);
+        portalRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (phase !== 'RECONNECTING') { setCountdown(0); return; }
@@ -26,17 +48,21 @@ export function ConnectionStatus({ phase, reconnectAttempt }: Props) {
     return () => clearInterval(id);
   }, [phase, reconnectAttempt]);
 
-  if (phase !== 'RECONNECTING' && phase !== 'RESUMING') return null;
+  if (!portalRef.current || (phase !== 'RECONNECTING' && phase !== 'RESUMING')) return null;
 
-  return (
+  return createPortal(
     <div
       role="status"
-      className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+      // Inline style for position/z-index — avoids any Tailwind purge or
+      // stacking-context interference from ancestor flex/overflow containers.
+      style={{ position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', zIndex: 9999 }}
+      className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 shadow-md dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
     >
       <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
       {phase === 'RECONNECTING'
         ? `Connection lost — reconnecting${countdown > 0 ? ` in ${countdown}s` : '…'} (attempt ${reconnectAttempt})`
         : 'Reconnected — replaying session…'}
-    </div>
+    </div>,
+    portalRef.current,
   );
 }

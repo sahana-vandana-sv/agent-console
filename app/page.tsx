@@ -46,16 +46,15 @@ export default function Home() {
 
   return (
     <div className="flex h-screen bg-white dark:bg-zinc-950">
+      {/* Floating reconnect toast — fixed so it never shifts layout */}
+      <ConnectionStatus phase={state.phase} reconnectAttempt={state.reconnectAttempt} />
+
       {/* Main chat column */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <header className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
           <h1 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Agent Console</h1>
           <p className="text-xs text-zinc-400">{state.phase}</p>
         </header>
-
-        <div className="px-4 pt-2">
-          <ConnectionStatus phase={state.phase} reconnectAttempt={state.reconnectAttempt} />
-        </div>
 
         <div className="flex-1 overflow-y-auto">
           <StreamingChat

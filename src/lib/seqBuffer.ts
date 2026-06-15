@@ -15,6 +15,18 @@ export interface SeqBuffer {
   reset(): void;
   /** True when there are messages waiting on a gap. */
   hasPending(): boolean;
+  /**
+   * Evict from `seen` and `buffer` any entries with seq > lastRendered, and
+   * reset nextExpected to lastRendered + 1.
+   *
+   * Called on reconnect before sending RESUME. The `seen` Set can run ahead of
+   * lastProcessedSeq when messages arrived and were dedup-marked but the
+   * connection dropped before the reducer committed them (e.g. mid token-batch
+   * or inside the 16ms rAF accumulation window). Without this trim, the server's
+   * replay of those seqs hits `seen.has(seq) → true` and is dropped silently,
+   * leaving a permanent gap in the rendered output.
+   */
+  trimAfter(lastRendered: number): void;
 }
 
 export function createSeqBuffer(): SeqBuffer {
@@ -78,6 +90,21 @@ let nextExpected = 1;
 
     hasPending(): boolean {
       return buffer.size > 0;
+    },
+
+    trimAfter(lastRendered: number): void {
+      // Remove from `seen` any seq that was received but not yet committed to
+      // the reducer (seq > lastRendered). The server will replay those seqs and
+      // they must pass through dedup rather than being silently dropped.
+      for (const s of seen) {
+        if (s > lastRendered) seen.delete(s);
+      }
+      // Discard any buffered (held, not yet dispatched) messages beyond lastRendered.
+      for (const [s] of buffer) {
+        if (s > lastRendered) buffer.delete(s);
+      }
+      // Reset the drain pointer so the buffer waits for lastRendered+1 next.
+      nextExpected = lastRendered + 1;
     },
   };
 }

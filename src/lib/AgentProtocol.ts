@@ -8,8 +8,11 @@ const WS_URL            = 'ws://localhost:4747/ws';
 const BACKOFF           = [500, 1000, 2000, 4000, 10000] as const;
 const GAP_TIMEOUT_MS    = 3000;
 // After RESUME, the server replays history but never continues execution.
-// STREAM_END may never arrive. Give up after this long and force-complete.
+// STREAM_END may never arrive. Hard upper-bound timeout:
 const REPLAY_TIMEOUT_MS = 8000;
+// If no message arrives for this long after the last replayed message,
+// treat replay as silently complete (server burst ended, no STREAM_END coming).
+const REPLAY_IDLE_MS = 500;
 
 export class AgentProtocol {
   private ws: WebSocket | null = null;
@@ -35,8 +38,18 @@ export class AgentProtocol {
 
   private seqBuf       = createSeqBuffer();
   private gapTimer:    ReturnType<typeof setTimeout> | null = null;
-  // Fires after RESUME if STREAM_END never arrives (chaos: server doesn't continue script)
+  // Hard upper-bound timeout after RESUME — fires if STREAM_END never arrives
   private replayTimer: ReturnType<typeof setTimeout> | null = null;
+  // Idle detector — only armed after the first NEW event (seq > resumeLastSeq)
+  // arrives. Fires when the server's burst ends and goes silent.
+  private replayIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  // The lastProcessedSeq value at the moment RESUME was sent. Used to detect
+  // when the server has crossed into "new" events we haven't seen yet.
+  private resumeLastSeq = 0;
+  // True once we've received at least one event with seq > resumeLastSeq.
+  // The idle timer must not start until this is true — before then, silence
+  // between dropped-replayed events would falsely end the stream.
+  private replayNewEventSeen = false;
 
   // Tracks PING challenges already responded to on the CURRENT connection.
   // After RESUME, the server replays history including old PINGs. Those replayed
@@ -95,6 +108,7 @@ export class AgentProtocol {
 destroy(): void {
     this.reconnectTimer  && clearTimeout(this.reconnectTimer);
     this.gapTimer        && clearTimeout(this.gapTimer);
+    this.replayIdleTimer && clearTimeout(this.replayIdleTimer);
     this.tokenBatchTimer && cancelAnimationFrame(this.tokenBatchTimer);
     this.replayTimer     && clearTimeout(this.replayTimer);
     this.isReconnecting  = false;   // prevent stale flag on next connect()
@@ -120,7 +134,15 @@ destroy(): void {
       // RESUME must be the very first message after a genuine mid-session reconnect.
       // Guard: only send if a USER_MESSAGE was ever sent — RESUME { last_seq: 0 }
       // on a pre-session drop is meaningless and noisy in the server log.
-      this.send({ type: 'RESUME', last_seq: this.lastProcessedSeqRef.current });
+      this.resumeLastSeq      = this.lastProcessedSeqRef.current;
+      this.replayNewEventSeen = false;
+      // Evict from `seen` any seqs that arrived but were never committed to the
+      // reducer (seq > resumeLastSeq). The connection may have dropped mid
+      // token-batch (16ms rAF window) or mid gap-timer flush, leaving seen ahead
+      // of lastProcessedSeq. Without this, the server's replay of those seqs
+      // hits seen.has(seq)→true and is silently dropped — permanent render gap.
+      this.seqBuf.trimAfter(this.resumeLastSeq);
+      this.send({ type: 'RESUME', last_seq: this.resumeLastSeq });
       this.dispatch({ type: 'RECONNECT_SUCCESS' });
       this.isReconnecting   = false;
       this.reconnectAttempt = 0;
@@ -149,10 +171,32 @@ destroy(): void {
     }, REPLAY_TIMEOUT_MS);
   }
 
+  private armReplayIdleTimer(): void {
+    if (this.replayIdleTimer !== null) clearTimeout(this.replayIdleTimer);
+    this.replayIdleTimer = setTimeout(() => {
+      this.replayIdleTimer = null;
+      if (!this.isReplaying) return;   // natural STREAM_END already cleared it
+      console.log('%c⏱ REPLAY IDLE', 'color:#f97316;font-weight:bold',
+        `No message for ${REPLAY_IDLE_MS}ms — forcing STREAM_END`);
+      // Cancel the hard timeout — idle detector fired first
+      if (this.replayTimer !== null) { clearTimeout(this.replayTimer); this.replayTimer = null; }
+      this.isReplaying     = false;
+      this.replayCompleted = true;
+      const flushed = this.seqBuf.flush();
+      for (const m of flushed) this.dispatchMessage(m);
+      this.flushTokenBatch();
+      this.dispatch({ type: 'STREAM_END', streamId: '__replay_idle__' });
+    }, REPLAY_IDLE_MS);
+  }
+
   private clearReplayTimer(): void {
     if (this.replayTimer !== null) {
       clearTimeout(this.replayTimer);
       this.replayTimer = null;
+    }
+    if (this.replayIdleTimer !== null) {
+      clearTimeout(this.replayIdleTimer);
+      this.replayIdleTimer = null;
     }
     this.isReplaying     = false;
     this.replayCompleted = false;
@@ -162,6 +206,22 @@ destroy(): void {
     const msg = unsafeJsonParse(raw) as ServerMessage;
     // 📥 SERVER → CLIENT (raw, before seq ordering)
     console.log('%c📥 SERVER→CLIENT', 'color:#60a5fa;font-weight:bold', `seq=${msg.seq} type=${msg.type}`, msg);
+
+    // During replay: track whether we've crossed into new events (seq > resumeLastSeq).
+    // The idle timer only arms after the first new event — before that, silence
+    // between already-seen replayed events would falsely end the stream.
+    // Edge case: if ALL events were already seen (last_seq == server history length),
+    // the hard 8s timeout is the backstop — STREAM_END from server is preferred.
+    if (this.isReplaying && 'seq' in msg) {
+      const s = (msg as { seq: number }).seq;
+      if (s > this.resumeLastSeq) {
+        this.replayNewEventSeen = true;
+      }
+    }
+    if (this.isReplaying && this.replayNewEventSeen) {
+      this.armReplayIdleTimer();
+    }
+
     const ready = this.seqBuf.add(msg);
 
     if (ready.length === 0) {
@@ -321,7 +381,17 @@ destroy(): void {
       }
 
       case 'STREAM_END': {
-        this.clearReplayTimer();    // natural STREAM_END — cancel the replay timeout
+        // During replay the server replays the ORIGINAL STREAM_END from history.
+        // If its seq is ≤ resumeLastSeq it was already processed before the drop —
+        // treat it as already-seen history and ignore it. The replay timer / idle
+        // timer will end the stream once genuinely new events stop arriving.
+        // A STREAM_END with seq > resumeLastSeq is a real new end-of-stream.
+        if (this.isReplaying && msg.seq <= this.resumeLastSeq) {
+          console.log('%c⏭ REPLAY: skipping already-seen STREAM_END', 'color:#94a3b8',
+            `seq=${msg.seq} resumeLastSeq=${this.resumeLastSeq}`);
+          break;
+        }
+        this.clearReplayTimer();    // cancel replay timers — stream is definitively done
         this.flushTokenBatch();
         this.dispatch({ type: 'STREAM_END', streamId: msg.stream_id });
         break;

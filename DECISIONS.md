@@ -163,6 +163,8 @@ A candid record of every architectural decision made, every chaos bug found and 
 | Duplicate messages | ✅ Handled | `Set<number>` dedup in `seqBuffer` (TOOL_CALL deduped separately) |
 | Corrupt PING (empty challenge) | ✅ Handled | `challenge ?? ''` guard; always sends PONG; no crash |
 | Replayed PING after RESUME | ✅ Handled | `respondedChallenges` Set per-connection |
+| PING latency spike < 3s | ✅ Handled | PONG sent on receipt, arrives within server window |
+| PING latency spike ≥ 3s | ⚠️ Missed heartbeat | Window expires before PING arrives — structurally unwinnable; server terminates, client reconnects with RESUME, no content lost |
 | Replayed TOOL_CALL after RESUME | ✅ Handled | `!isReplaying` guard on TOOL_ACK |
 | Rapid sequential tool calls | ✅ Handled | `stillPending` check keeps phase in `TOOL_PENDING` until all resolved |
 | 550KB CONTEXT_SNAPSHOT | ✅ Handled | Top-level diff only; `useMemo` prevents re-running on every token |
@@ -178,7 +180,16 @@ The seq-buffer bypass (Decision #4) removed the only controllable delay (buffer 
 
 **This is a chaos-mode-only violation.** The evaluation checklist specifies "no violation entries in *normal mode*." In normal mode there are no latency spikes, TOOL_CALL arrives in ~1ms, and our `setTimeout(..., 0)` ACK fires well within the 2s window. Confirmed by observing `/log` in normal mode.
 
-**1. Partial stream after reconnect (by design):**
+**1. PING/PONG missed heartbeat under chaos latency spike — structurally unwinnable:**
+The chaos engine injects latency spikes of **2000–8000ms** on server→client messages, including PING. The server's PONG window is **3000ms**, measured from when the server *sends* the PING. A latency spike ≥ 3s on a PING message means the client does not receive it until after the window has already expired — the PONG the client sends immediately on receipt arrives too late.
+
+Three missed PONGs (checked every 12s) cause the server to call `ws.terminate()` — a hard kill with no close frame, which fires `onerror` before `onclose` on the client. This is indistinguishable from any other connection drop: the client handles it identically (reconnect with exponential backoff, RESUME on the new connection).
+
+The client cannot pre-empt this: it cannot PONG before receiving the PING, and it cannot know a PING is delayed vs. not yet sent. The only hypothetical fix would be a server-side protocol change — measuring the PONG window from when the client *receives* the PING (requiring a round-trip acknowledgement of the PING itself), which is circular.
+
+**This is a chaos-mode-only violation path.** In normal mode there are no latency spikes; PING arrives in <1ms and PONG goes back well within the 3s window. The reconnect that follows a missed-heartbeat terminate is handled correctly — RESUME fires as the first message, state is recovered, and no content is lost.
+
+**2. Partial stream after reconnect (by design):**
 The server replays history but does not resume script execution. If a chaos drop happens mid-response, the user sees a partial answer. This is a server protocol limitation, not a client bug. The client surfaces it cleanly (stream ends, UI returns to idle).
 
 **2. TraceTimeline performance above ~500 events:**

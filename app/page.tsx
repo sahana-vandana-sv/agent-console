@@ -35,6 +35,13 @@ export default function Home() {
     setActiveSegmentId((prev) => (prev === segmentId ? null : segmentId));
   }, []);
 
+  // Stable callbacks — must not be inline arrows.
+  // ContextInspector and TraceTimeline are memo'd; an inline () => setState(...)
+  // creates a new function reference on every parent render, defeating memo and
+  // causing the 550KB JsonTree to re-render on every token batch.
+  const handleToggleTrace   = useCallback(() => setTraceOpen(v => !v), []);
+  const handleToggleContext = useCallback(() => setContextOpen(v => !v), []);
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const content = input.trim();
@@ -92,7 +99,7 @@ export default function Home() {
           events={state.traceEvents}
           segments={state.segments}
           isOpen={traceOpen}
-          onToggle={() => setTraceOpen((v) => !v)}
+          onToggle={handleToggleTrace}
           activeSegmentId={activeSegmentId}
           onSegmentFocus={handleSegmentFocus}
         />
@@ -103,7 +110,7 @@ export default function Home() {
         <ContextInspector
           contextSnapshots={state.contextSnapshots}
           isOpen={contextOpen}
-          onToggle={() => setContextOpen((v) => !v)}
+          onToggle={handleToggleContext}
         />
       </div>
     </div>

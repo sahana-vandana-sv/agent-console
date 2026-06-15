@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { memo, useEffect, useRef, useMemo, useState } from 'react';
 import type { ContextSnapshot } from '../../types/state';
 import { JsonTree } from './JsonTree';
 import { DiffView } from './DiffView';
@@ -13,10 +13,18 @@ interface Props {
   onToggle: () => void;
 }
 
-export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) {
+// memo: contextSnapshots reference is stable across TOKENS_BATCH dispatches
+// (the reducer only creates a new Map on CONTEXT_SNAPSHOT actions). With memo,
+// the 550KB JsonTree is fully insulated from token streaming re-renders —
+// it only re-renders when a new snapshot actually arrives.
+// Requires onToggle to be stable (useCallback in page.tsx) — an inline arrow
+// would create a new reference on every parent render and defeat memo.
+export const ContextInspector = memo(function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) {
   const contextIds = Array.from(contextSnapshots.keys());
   const [activeCtx, setActiveCtx] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
+  // true once the user has manually moved the scrubber — suppresses auto-advance.
+  const userHasScrubbed = useRef(false);
 
   // Validate activeCtx against the CURRENT map — it may be stale from a previous
   // conversation turn (USER_MESSAGE_SENT resets the map but not local component state).
@@ -26,6 +34,21 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
       : contextIds[0] ?? null;
 
   const history = currentCtx ? (contextSnapshots.get(currentCtx) ?? []) : [];
+
+  // Auto-advance scrubber to the latest snapshot when new history arrives,
+  // unless the user has manually scrubbed back to an earlier snapshot.
+  useEffect(() => {
+    if (history.length > 0 && !userHasScrubbed.current) {
+      setActiveIndex(history.length - 1);
+    }
+  }, [history.length]);
+
+  // When the active context changes (tab switch or new turn), reset scrub state
+  // so the next snapshot auto-advances again.
+  useEffect(() => {
+    userHasScrubbed.current = false;
+    setActiveIndex(0);
+  }, [currentCtx]);
 
   // Clamp activeIndex — guards against stale index when switching contexts or
   // when a new turn resets the map to fewer snapshots than before.
@@ -44,10 +67,16 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
     [prevSnapshot?.seq, snapshot?.seq], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  const addedKeys = useMemo(
-    () => new Set(diff.added.map((e) => e.key)),
-    [diff],
-  );
+  // Build a single marker map covering all three diff categories.
+  // Previously only diff.added was extracted — diff.changed and diff.removed
+  // were silently discarded, so changed keys (e.g. `tables`) got no highlight.
+  const diffMarkers = useMemo(() => {
+    const m = new Map<string, 'added' | 'changed' | 'removed'>();
+    for (const e of diff.added)   m.set(e.key, 'added');
+    for (const e of diff.changed) m.set(e.key, 'changed');
+    for (const e of diff.removed) m.set(e.key, 'removed');
+    return m;
+  }, [diff]);
 
   return (
     <div className="flex h-full flex-col border-l border-zinc-200 dark:border-zinc-700">
@@ -86,12 +115,17 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
               <HistoryScrubber
                 history={history}
                 activeIndex={safeIndex}
-                onSelect={(i) => setActiveIndex(i)}
+                onSelect={(i) => {
+                  // User explicitly moved the scrubber — suppress auto-advance
+                  // until the context changes or a new turn starts.
+                  userHasScrubbed.current = true;
+                  setActiveIndex(i);
+                }}
               />
               {prevSnapshot && <DiffView diff={diff} />}
               <div className="flex-1 overflow-y-auto px-3 py-2">
                 {snapshot && (
-                  <JsonTree data={snapshot.data} highlightKeys={addedKeys} />
+                  <JsonTree data={snapshot.data} diffMarkers={diffMarkers} />
                 )}
               </div>
             </>
@@ -102,4 +136,4 @@ export function ContextInspector({ contextSnapshots, isOpen, onToggle }: Props) 
       )}
     </div>
   );
-}
+});

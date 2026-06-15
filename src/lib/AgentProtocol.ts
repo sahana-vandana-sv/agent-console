@@ -9,10 +9,13 @@ const BACKOFF           = [500, 1000, 2000, 4000, 10000] as const;
 const GAP_TIMEOUT_MS    = 3000;
 // After RESUME, the server replays history but never continues execution.
 // STREAM_END may never arrive. Hard upper-bound timeout:
-const REPLAY_TIMEOUT_MS = 8000;
-// If no message arrives for this long after the last replayed message,
-// treat replay as silently complete (server burst ended, no STREAM_END coming).
-const REPLAY_IDLE_MS = 500;
+const REPLAY_TIMEOUT_MS = 20000;
+// If no message arrives for this long after the last NEW replayed event
+// (seq > resumeLastSeq), treat replay as silently complete.
+// Must exceed the chaos-mode max latency spike (8 000 ms) so a spike between
+// two consecutive replayed messages doesn't falsely end the stream.
+// 9 500 ms = 8 000 ms max spike + 1 500 ms margin.
+const REPLAY_IDLE_MS = 9500;
 
 export class AgentProtocol {
   private ws: WebSocket | null = null;

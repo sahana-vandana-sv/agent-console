@@ -210,18 +210,23 @@ destroy(): void {
     // 📥 SERVER → CLIENT (raw, before seq ordering)
     console.log('%c📥 SERVER→CLIENT', 'color:#60a5fa;font-weight:bold', `seq=${msg.seq} type=${msg.type}`, msg);
 
-    // During replay: track whether we've crossed into new events (seq > resumeLastSeq).
-    // The idle timer only arms after the first new event — before that, silence
-    // between already-seen replayed events would falsely end the stream.
-    // Edge case: if ALL events were already seen (last_seq == server history length),
-    // the hard 8s timeout is the backstop — STREAM_END from server is preferred.
+    // During replay: arm the idle timer on EVERY message (not just new events).
+    // Previously the idle timer was gated on replayNewEventSeen — this caused a
+    // false silence window when there was a server-side delay between the last
+    // old event and the first new event (normal batching gap), which triggered
+    // the idle timer mid-replay.
+    //
+    // Now we reset the idle on every message so it only fires 9 500 ms after
+    // the truly last message the server sends. For the common case (stream
+    // completed before drop), the replayed STREAM_END now fires immediately
+    // (see STREAM_END handler below) so the idle timer is cancelled before it
+    // ever fires. The idle is only the backstop for "stream cut off mid-execution"
+    // where no STREAM_END exists in history.
     if (this.isReplaying && 'seq' in msg) {
       const s = (msg as { seq: number }).seq;
       if (s > this.resumeLastSeq) {
         this.replayNewEventSeen = true;
       }
-    }
-    if (this.isReplaying && this.replayNewEventSeen) {
       this.armReplayIdleTimer();
     }
 
@@ -349,18 +354,22 @@ destroy(): void {
           args: msg.args,
           streamId: msg.stream_id,
         });
-        // Send TOOL_ACK immediately (well within the 2 s window).
+        // Send TOOL_ACK synchronously — no setTimeout.
+        //
+        // The previous setTimeout(0) yielded to the event loop, allowing a
+        // TOOL_RESULT that arrived in the same network burst to be processed
+        // BEFORE the ACK went out (TOOL_RESULT onmessage fires during the yield).
+        // Sending synchronously eliminates this race and ensures ACK goes out
+        // in the same call stack as the TOOL_CALL dispatch — minimum possible
+        // latency.
+        //
         // During replay, suppress ACKs for calls the server already received
-        // (seq ≤ resumeLastSeq — those are in `seen` and can't reach here anyway).
-        // If a TOOL_CALL passes dedup during replay (seq > resumeLastSeq), the
-        // original ACK was never delivered (connection dropped before it arrived),
-        // so we MUST send a fresh ACK — do not suppress it.
+        // (seq ≤ resumeLastSeq — filtered by seen Set, can't reach here).
+        // If a TOOL_CALL passes dedup during replay (seq > resumeLastSeq) the
+        // original ACK was never delivered — send a fresh ACK.
         if (!this.isReplaying || msg.seq > this.resumeLastSeq) {
-          const callId = msg.call_id;
-          setTimeout(() => {
-            console.log('%c✅ TOOL_ACK sent', 'color:#22c55e;font-weight:bold', `call_id=${callId}`);
-            this.send({ type: 'TOOL_ACK', call_id: callId });
-          }, 0);
+          console.log('%c✅ TOOL_ACK sent', 'color:#22c55e;font-weight:bold', `call_id=${msg.call_id}`);
+          this.send({ type: 'TOOL_ACK', call_id: msg.call_id });
         }
         break;
       }
@@ -386,15 +395,20 @@ destroy(): void {
       }
 
       case 'STREAM_END': {
-        // During replay the server replays the ORIGINAL STREAM_END from history.
-        // If its seq is ≤ resumeLastSeq it was already processed before the drop —
-        // treat it as already-seen history and ignore it. The replay timer / idle
-        // timer will end the stream once genuinely new events stop arriving.
-        // A STREAM_END with seq > resumeLastSeq is a real new end-of-stream.
+        // Accept the replayed STREAM_END even if seq ≤ resumeLastSeq.
+        //
+        // Rationale: if STREAM_END is in the server's history it means the stream
+        // completed BEFORE the drop. After replaying catch-up events there is
+        // nothing more coming — dispatching STREAM_END immediately is correct and
+        // avoids the 9 500 ms idle-timer wait.
+        //
+        // Previously we skipped replayed STREAM_ENDs (seq ≤ resumeLastSeq) and
+        // relied on the idle timer to finish the stream. That caused a 9.5 s delay
+        // in the common "stream completed before drop" case and also fired
+        // prematurely when latency spikes created >500 ms gaps mid-replay.
         if (this.isReplaying && msg.seq <= this.resumeLastSeq) {
-          console.log('%c⏭ REPLAY: skipping already-seen STREAM_END', 'color:#94a3b8',
-            `seq=${msg.seq} resumeLastSeq=${this.resumeLastSeq}`);
-          break;
+          console.log('%c✅ REPLAY: accepting already-completed STREAM_END', 'color:#22c55e',
+            `seq=${msg.seq} resumeLastSeq=${this.resumeLastSeq} — stream was done before drop`);
         }
         this.clearReplayTimer();    // cancel replay timers — stream is definitively done
         this.flushTokenBatch();

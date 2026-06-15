@@ -163,6 +163,17 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
 
     // ── Tool call arrived — freeze current text segment ───────────────────
     case 'TOOL_CALL': {
+      // Idempotency guard: during replay after reconnect, the TOOL_CALL may have
+      // already been dispatched on the original connection (reducer ran, ToolSegment
+      // pushed) but the React re-render — and therefore lastProcessedSeqRef update —
+      // hadn't fired before the drop. trimAfter() evicts the seq from `seen` so the
+      // replayed TOOL_CALL passes dedup and reaches the reducer again. Without this
+      // check we'd push a second ToolSegment with the same callId.
+      if (state.segments.some(seg => seg.type === 'tool' && (seg as ToolSegment).callId === action.callId)) {
+        console.log('%c🔧 REDUCER: TOOL_CALL idempotent skip', 'color:#94a3b8',
+          `callId=${action.callId} already in segments — replay dedup`);
+        return state;
+      }
       console.log('%c🔧 REDUCER: TOOL_CALL', 'color:#f59e0b;font-weight:bold',
         `→ phase: TOOL_PENDING | pushing ToolSegment id=${action.callId} tool=${action.toolName}`);
       const toolSeg: ToolSegment = {

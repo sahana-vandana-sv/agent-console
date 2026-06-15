@@ -350,10 +350,12 @@ destroy(): void {
           streamId: msg.stream_id,
         });
         // Send TOOL_ACK immediately (well within the 2 s window).
-        // Suppress during replay — the server already received the ACK in the
-        // original session; sending it again on the new connection causes
-        // "unexpected TOOL_ACK" violations.
-        if (!this.isReplaying) {
+        // During replay, suppress ACKs for calls the server already received
+        // (seq ≤ resumeLastSeq — those are in `seen` and can't reach here anyway).
+        // If a TOOL_CALL passes dedup during replay (seq > resumeLastSeq), the
+        // original ACK was never delivered (connection dropped before it arrived),
+        // so we MUST send a fresh ACK — do not suppress it.
+        if (!this.isReplaying || msg.seq > this.resumeLastSeq) {
           const callId = msg.call_id;
           setTimeout(() => {
             console.log('%c✅ TOOL_ACK sent', 'color:#22c55e;font-weight:bold', `call_id=${callId}`);

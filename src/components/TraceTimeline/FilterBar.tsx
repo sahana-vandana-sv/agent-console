@@ -13,8 +13,7 @@ const EVENT_TYPES = [
   'TOOL_CALL',
   'TOOL_RESULT',
   'CONTEXT_SNAPSHOT',
-  'PING',
-  'PONG',
+  'PING/PONG',
   'STREAM_END',
   'ERROR',
 ];

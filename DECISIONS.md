@@ -2,7 +2,7 @@
 
 ## What This Document Is
 
-A candid record of every architectural decision made, every chaos bug found and fixed, every tradeoff accepted, and every thing we would do differently if starting over. Written for evaluators who will read the `/log` output and watch the screen recording.
+A record of every architectural decision made, every chaos bug found and fixed, every tradeoff accepted, and every thing I would do differently if starting over.
 
 ---
 
@@ -12,13 +12,13 @@ A candid record of every architectural decision made, every chaos bug found and 
 
 **Decision:** `AgentProtocol` (pure TS class, zero React imports) → `useAgentReducer` (useReducer, no WebSocket logic) → React components (read-only render).
 
-**Why:** WebSocket connections must survive React's strict-mode double-effect mount/unmount cycle without causing double-RESUME or double-connect. Keeping the protocol in a class with a stable `useRef` reference means the connection lifecycle is unaffected by re-renders. The reducer gets clean, ordered, deduplicated actions and never needs to know *why* a message was delayed.
+**Why:** WebSocket connections must survive React's strict-mode double-effect mount/unmount cycle without causing double-RESUME or double-connect. Keeping the protocol in a class with a stable `useRef` reference means the connection lifecycle is unaffected by re-renders. The reducer gets clean, ordered, deduplicated actions and never needs to know _why_ a message was delayed.
 
 **Tradeoff:** Two files must stay in sync (`AgentAction` in `state.ts` and the `dispatch()` call sites in `AgentProtocol.ts`). TypeScript strict mode catches mismatches at build time; no runtime risk.
 
 ---
 
-### 2. useReducer over Redux / Zustand
+### 2. useReducer over Redux / Zustand ---> this must be in readme
 
 **Decision:** Native `useReducer` with a typed `StreamState`.
 
@@ -42,7 +42,7 @@ A candid record of every architectural decision made, every chaos bug found and 
 
 ### 4. TOOL_CALL bypasses seq ordering
 
-**Decision:** In `seqBuffer.ts`, `TOOL_CALL` messages are deduped but *not* held in the ordering buffer — they are dispatched immediately on arrival.
+**Decision:** In `seqBuffer.ts`, `TOOL_CALL` messages are deduped but _not_ held in the ordering buffer — they are dispatched immediately on arrival.
 
 **Why:** The server requires `TOOL_ACK` within 2 seconds of `TOOL_CALL`. In chaos mode, latency spikes reach 8 seconds. If `TOOL_CALL` sits in the seq buffer waiting for earlier seq numbers, the combined delay (latency spike + gap timer) can easily exceed 2s, causing a `TOOL_ACK_TIMEOUT` violation.
 
@@ -65,6 +65,7 @@ A candid record of every architectural decision made, every chaos bug found and 
 **Window B (timer fires before drop):** Replay timer fires at t+8s. `isReplaying` → `false`, `replayCompleted` → `true`. Connection drops at t+10s. `onClose` sees `isReplaying=false` → would normally reconnect. Without the `replayCompleted` guard, another `RESUME` is sent → loop.
 
 **Tradeoff:** Two flags interacting is subtle. The invariant is: exactly one of `{neither, isReplaying, replayCompleted}` is true at any time. This is maintained by:
+
 - `sendUserMessage` → clears both
 - `onOpen` (reconnect path) → sets `isReplaying=true`
 - replay timer fires → sets `isReplaying=false`, `replayCompleted=true`
@@ -100,7 +101,7 @@ A candid record of every architectural decision made, every chaos bug found and 
 
 **Decision:** After sending RESUME, arm an 8-second timer. If no `STREAM_END` arrives, force-flush the seq buffer and dispatch a synthetic `STREAM_END`.
 
-**Why:** The server replays history after RESUME but does *not* resume executing the script. If the original stream was cut mid-way, `STREAM_END` was never in the history — it will never arrive on the new connection. Without a timeout, the client hangs in `RESUMING` phase indefinitely.
+**Why:** The server replays history after RESUME but does _not_ resume executing the script. If the original stream was cut mid-way, `STREAM_END` was never in the history — it will never arrive on the new connection. Without a timeout, the client hangs in `RESUMING` phase indefinitely.
 
 **Why 8000ms:** The chaos latency spike is up to 8s. We need to give all replayed messages (which can arrive slowly due to the same chaos parameters) time to arrive before force-completing. A lower value (e.g. 3000ms) risks cutting off valid replay messages that are still in-flight.
 
@@ -125,6 +126,7 @@ A candid record of every architectural decision made, every chaos bug found and 
 **Why:** The 550KB `large_context` payload has 64 top-level table entries. Deep-comparing all nested nodes on every context snapshot would be O(n×m) — potentially millions of comparisons. The tiered approach answers "did this top-level value change?" in O(1) for the common case (unchanged reference) and falls back to `JSON.stringify` per-key only when needed. See [JSON Diff and Tree Rendering](#json-diff-and-tree-rendering--core-concepts) for full rationale.
 
 **Confirmed correct for the test cases:**
+
 - `report_summary`: snapshot 2 adds `current_focus` and `extracted_metrics` → `added: 2`
 - `large_context`: snapshot 2 adds `analysis_complete` and `flagged_issues` → `added: 2`
 - All other keys unchanged (same reference) → `changed: 0`
@@ -137,33 +139,33 @@ A candid record of every architectural decision made, every chaos bug found and 
 
 ### What works reliably
 
-| Chaos condition | Status | Evidence |
-|---|---|---|
-| Connection drop mid-stream | ✅ Handled | `isReplaying` + `replayCompleted` flags prevent infinite RESUME loop |
-| Latency spike (2–8s) | ✅ Handled | TOOL_CALL bypasses seq buffer → ACK within 2s regardless of spike |
-| Out-of-order delivery | ✅ Handled | `seqBuffer` holds messages until contiguous run, gap-flush at 3s |
-| Duplicate messages | ✅ Handled | `Set<number>` dedup in `seqBuffer` (TOOL_CALL deduped separately) |
-| Corrupt PING (empty challenge) | ✅ Handled | `challenge ?? ''` guard; always sends PONG; no crash |
-| Replayed PING after RESUME | ✅ Handled | `respondedChallenges` Set per-connection |
-| PING latency spike < 3s | ✅ Handled | PONG sent on receipt, arrives within server window |
-| PING latency spike ≥ 3s | ⚠️ Missed heartbeat | Window expires before PING arrives — structurally unwinnable; server terminates, client reconnects with RESUME, no content lost |
-| Replayed TOOL_CALL after RESUME | ✅ Handled | `!isReplaying` guard on TOOL_ACK |
-| Rapid sequential tool calls | ✅ Handled | `stillPending` check keeps phase in `TOOL_PENDING` until all resolved |
-| 550KB CONTEXT_SNAPSHOT | ✅ Handled | Top-level diff only; `useMemo` on seq numbers prevents re-running on every token |
-| `lookup` (TOOL_CALL before any token) | ✅ Handled | Reducer creates fresh TextSegment after tool resolves |
-| STREAM_END never arrives post-reconnect | ✅ Handled | 8s replay timeout force-completes stream |
+| Chaos condition                         | Status              | Evidence                                                                                                                        |
+| --------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Connection drop mid-stream              | ✅ Handled          | `isReplaying` + `replayCompleted` flags prevent infinite RESUME loop                                                            |
+| Latency spike (2–8s)                    | ✅ Handled          | TOOL_CALL bypasses seq buffer → ACK within 2s regardless of spike                                                               |
+| Out-of-order delivery                   | ✅ Handled          | `seqBuffer` holds messages until contiguous run, gap-flush at 3s                                                                |
+| Duplicate messages                      | ✅ Handled          | `Set<number>` dedup in `seqBuffer` (TOOL_CALL deduped separately)                                                               |
+| Corrupt PING (empty challenge)          | ✅ Handled          | `challenge ?? ''` guard; always sends PONG; no crash                                                                            |
+| Replayed PING after RESUME              | ✅ Handled          | `respondedChallenges` Set per-connection                                                                                        |
+| PING latency spike < 3s                 | ✅ Handled          | PONG sent on receipt, arrives within server window                                                                              |
+| PING latency spike ≥ 3s                 | ⚠️ Missed heartbeat | Window expires before PING arrives — structurally unwinnable; server terminates, client reconnects with RESUME, no content lost |
+| Replayed TOOL_CALL after RESUME         | ✅ Handled          | `!isReplaying` guard on TOOL_ACK                                                                                                |
+| Rapid sequential tool calls             | ✅ Handled          | `stillPending` check keeps phase in `TOOL_PENDING` until all resolved                                                           |
+| 550KB CONTEXT_SNAPSHOT                  | ✅ Handled          | Top-level diff only; `useMemo` on seq numbers prevents re-running on every token                                                |
+| `lookup` (TOOL_CALL before any token)   | ✅ Handled          | Reducer creates fresh TextSegment after tool resolves                                                                           |
+| STREAM_END never arrives post-reconnect | ✅ Handled          | 8s replay timeout force-completes stream                                                                                        |
 
 ### Known limitations
 
 **1. TOOL_ACK_TIMEOUT under chaos latency spike — structurally unwinnable:**
-The chaos engine injects latency spikes of **2000–8000ms** on individual messages. The server's TOOL_ACK window is **2000ms**, measured from when the server *sends* the TOOL_CALL — not from when the client receives it. The minimum spike (2000ms) exactly equals the entire ACK budget. Any latency spike on a TOOL_CALL message makes the 2s window physically unreachable, regardless of how fast the client responds.
+The chaos engine injects latency spikes of **2000–8000ms** on individual messages. The server's TOOL_ACK window is **2000ms**, measured from when the server _sends_ the TOOL_CALL — not from when the client receives it. The minimum spike (2000ms) exactly equals the entire ACK budget. Any latency spike on a TOOL_CALL message makes the 2s window physically unreachable, regardless of how fast the client responds.
 
 The seq-buffer bypass (Decision #4) removed the only controllable delay. What remains is pure injected network latency the client cannot anticipate. When the TOOL_CALL arrives 5s late, the server already logged the timeout 3s earlier.
 
 **Chaos-mode only.** In normal mode there are no latency spikes; TOOL_CALL arrives in ~1ms and ACK fires well within the 2s window. Confirmed clean by observing `/log` in normal mode.
 
 **2. PING/PONG missed heartbeat under chaos latency spike — structurally unwinnable:**
-The server's PONG window is **3000ms** from when it *sends* the PING. A latency spike ≥ 3s means the client doesn't receive the PING until after the window has expired — the PONG it sends immediately arrives too late. Three missed PONGs trigger `ws.terminate()`, which the client handles identically to any other drop (reconnect → RESUME → no content lost). The client cannot PONG before receiving the PING.
+The server's PONG window is **3000ms** from when it _sends_ the PING. A latency spike ≥ 3s means the client doesn't receive the PING until after the window has expired — the PONG it sends immediately arrives too late. Three missed PONGs trigger `ws.terminate()`, which the client handles identically to any other drop (reconnect → RESUME → no content lost). The client cannot PONG before receiving the PING.
 
 **Chaos-mode only.** In normal mode PING arrives in <1ms; PONG is back well within 3s.
 
@@ -187,6 +189,7 @@ In ~15–35% of chaos messages, preceding tokens may arrive after the TOOL_CALL 
 
 **Why this is a protocol design gap, not a client bug:**
 The server does not distinguish between:
+
 - Case A: ACK was sent, connection dropped before server received it
 - Case B: Client crashed, ACK was never sent
 
@@ -205,7 +208,7 @@ In both cases the server records a violation after 2s. There is no mechanism for
 Two structures inside `seqBuffer.ts`:
 
 - **`Map<number, ServerMessage>`** — the ordering buffer. Key is `seq`, value is the raw message. Holds out-of-order messages until earlier seqs arrive to form a contiguous run.
-- **`Set<number>`** — the dedup guard. Tracks every seq that has been *dispatched* (not just received). Before processing any message, check `seen.has(seq)` — if true, discard silently.
+- **`Set<number>`** — the dedup guard. Tracks every seq that has been _dispatched_ (not just received). Before processing any message, check `seen.has(seq)` — if true, discard silently.
 
 `nextExpected: number` — a plain integer tracking the next contiguous seq the buffer is waiting for. Starts at 1 (server `++seq` means first message is always seq=1).
 
@@ -215,7 +218,7 @@ The access pattern is: "do I have seq N?" and "give me all messages from N to M 
 
 ### Why Set for dedup, not checking the Map
 
-The Map is cleared after draining. If a duplicate arrives *after* the original has been dispatched and removed from the Map, the Map check would pass and the duplicate would go through. The `Set` persists across drains for the lifetime of the turn, catching late duplicates regardless of timing.
+The Map is cleared after draining. If a duplicate arrives _after_ the original has been dispatched and removed from the Map, the Map check would pass and the duplicate would go through. The `Set` persists across drains for the lifetime of the turn, catching late duplicates regardless of timing.
 
 ### The trimAfter(n) invariant
 
@@ -230,6 +233,7 @@ On reconnection, `seen` may contain entries for messages the socket received but
 ### The problem
 
 When `TOOL_CALL` arrives mid-stream, the streaming text stops and a tool card must appear inline. Two failure modes:
+
 1. **Reflow**: the tool card pushes existing text up/down as it mounts.
 2. **Height collapse**: the text container shrinks while waiting for the tool card, then jumps back when text resumes.
 
@@ -271,6 +275,7 @@ lastProcessedSeqRef.current = state.lastProcessedSeq; // written during render, 
 Writing in the render body (not `useEffect`) means the ref updates as part of React's synchronous render pass — before any effects fire, before any new WebSocket messages are processed. This makes `lastProcessedSeqRef.current` the most accurate available proxy for "what is visually committed."
 
 `AgentProtocol` holds a reference to this ref (passed at construction). When `onOpen` fires after reconnection:
+
 1. `seqBuf.trimAfter(lastProcessedSeqRef.current)` — evicts socket-ahead-of-DOM entries from `seen`
 2. `send({ type: 'RESUME', last_seq: lastProcessedSeqRef.current })` — carries DOM truth, not socket truth
 
@@ -281,6 +286,7 @@ Writing in the render body (not `useEffect`) means the ref updates as part of Re
 ### Why top-level diff, not recursive diff
 
 Diffing only at the top level is not a shortcut — it is the correct scope. Both test cases change at the root:
+
 - `report_summary`: snapshot 2 adds `current_focus` and `extracted_metrics` at root level.
 - `large_context`: snapshot 2 adds `analysis_complete` and `flagged_issues` at root level.
 
@@ -291,6 +297,7 @@ Recursive diff would visit thousands of nested nodes (64 tables × columns × pr
 Reference equality alone (`===`) produces false positives: `JSON.parse()` always returns new object instances, so all 64 table values from `generateLargeContext()` have new references even when content is identical.
 
 Resolution — cheapest check first:
+
 1. **Reference equality** `a === b` — instant. Handles primitives and cached objects.
 2. **Type / null guard** — O(1) fast reject for mismatched types.
 3. **Array length check** — O(1) reject before serialisation.
@@ -301,6 +308,7 @@ Resolution — cheapest check first:
 ### Why lazy tree mounting, not virtualisation
 
 Two approaches prevent a 550KB JSON tree from freezing the tab:
+
 - **Virtual scroll**: mount only DOM nodes in the visible window; recycle on scroll.
 - **Lazy expand**: nodes start collapsed; children are never mounted until the user clicks.
 
@@ -333,6 +341,7 @@ Using the object key string as the React key (`key={nodeKey}`) means React reuse
 The diff output — `{ added, removed, changed }` arrays — is passed into the tree as `diffMarkers: Map<string, 'added' | 'changed' | 'removed'>`, not as a modified version of the data. The tree still renders from `snapshot.data`. The highlight is a display annotation layered on top.
 
 This means:
+
 - The tree structure is stable across snapshot updates (same data, same keys, same component instances).
 - A new snapshot does not cause the tree to re-mount or re-evaluate all nodes.
 - All three diff categories (added → green, changed → amber, removed → red strikethrough) are covered by a single Map pass rather than three separate Set lookups.
@@ -357,12 +366,12 @@ This means:
 
 ### What breaks at 50 streams
 
-| Component | Problem at 50 streams |
-|---|---|
+| Component                       | Problem at 50 streams                                                                     |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
 | Single `AgentProtocol` instance | One WebSocket per stream → 50 concurrent connections, 50 reconnect timers, 50 seq buffers |
-| Single `useAgentReducer` | Every token from any stream triggers a full reducer evaluation and top-level re-render |
-| `TraceTimeline` | 50 streams × 60 tokens/sec = 3000 state updates/sec, all re-rendering one component |
-| Token batching | 50 separate rAF loops firing every 16ms |
+| Single `useAgentReducer`        | Every token from any stream triggers a full reducer evaluation and top-level re-render    |
+| `TraceTimeline`                 | 50 streams × 60 tokens/sec = 3000 state updates/sec, all re-rendering one component       |
+| Token batching                  | 50 separate rAF loops firing every 16ms                                                   |
 
 ### What we would change
 
@@ -371,7 +380,7 @@ This means:
 Replace `useAgentReducer` with a `StreamRegistry` — a `Map<streamId, StreamState>` managed outside React (in a `useRef` or Zustand). Each stream gets its own isolated state slice. Components subscribe only to their assigned stream:
 
 ```typescript
-const streamState = useStreamStore(s => s.streams.get(props.streamId));
+const streamState = useStreamStore((s) => s.streams.get(props.streamId));
 ```
 
 A token on stream A does not trigger re-render on stream B's component.
@@ -398,12 +407,12 @@ At 50 streams, `seqBuffer` reordering and `jsonDiff` on the main thread would bl
 
 ### What breaks at 100x length
 
-| Problem | Impact |
-|---|---|
-| `content: string` grows to megabytes | React diffing the full string on every token append is O(n) in content length |
-| Single `TextSegment` per text block | Every token append replaces the string — React considers the whole node changed |
-| `scrollIntoView` on every token | 60× per second on a long DOM causes layout thrash |
-| TraceTimeline | Thousands of grouped rows; no virtualisation → freeze |
+| Problem                              | Impact                                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| `content: string` grows to megabytes | React diffing the full string on every token append is O(n) in content length   |
+| Single `TextSegment` per text block  | Every token append replaces the string — React considers the whole node changed |
+| `scrollIntoView` on every token      | 60× per second on a long DOM causes layout thrash                               |
+| TraceTimeline                        | Thousands of grouped rows; no virtualisation → freeze                           |
 
 ### What we would change
 
@@ -413,9 +422,9 @@ Replace `content: string` with `chunks: string[]` (append-only array). Each toke
 
 ```typescript
 type TextSegment = {
-  type: 'text';
+  type: "text";
   id: string;
-  chunks: string[];   // append-only; never mutated in place
+  chunks: string[]; // append-only; never mutated in place
   seqStart: number;
   seqEnd: number;
 };

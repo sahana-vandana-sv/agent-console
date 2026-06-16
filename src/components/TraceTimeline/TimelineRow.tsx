@@ -12,9 +12,17 @@ export type TokenGroupRow = {
   totalTokens: number;
   durationMs: number;
   startTs: number;
-  /** id of the TextSegment this group maps to (for bidirectional highlight) */
-  segmentId: string | undefined;
-  /** Full text content of the TextSegment at the time of grouping — shown on expand */
+  /**
+   * IDs of all TextSegments covered by this group.
+   * May be multiple (e.g. text before + text after a tool call in the same stream).
+   * Used for bidirectional highlight: timeline click focuses segmentIds[0],
+   * chat TextChunk click checks segmentIds.includes(activeSegmentId).
+   */
+  segmentIds: string[];
+  /**
+   * Full concatenated text across all streamed segments — shown on expand.
+   * Populated by mergeTokenGroups after all per-segment content is known.
+   */
   textContent?: string;
 };
 
@@ -42,13 +50,21 @@ export type ToolResultRow = {
   callId: string;
 };
 
+export type PingPongRow = {
+  kind: 'ping_pong';
+  id: string;
+  pingEvent: TraceEvent;
+  /** Undefined if the connection dropped before PONG was received */
+  pongEvent?: TraceEvent;
+};
+
 export type OtherRow = {
   kind: 'other';
   id: string;
   event: TraceEvent;
 };
 
-export type DisplayRow = TokenGroupRow | ToolCallRow | ToolResultRow | OtherRow;
+export type DisplayRow = TokenGroupRow | ToolCallRow | ToolResultRow | PingPongRow | OtherRow;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -134,11 +150,12 @@ export const TokenGroupRowView = memo(function TokenGroupRowView({
     >
       <div
         className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60 ${isActive ? 'bg-blue-50 dark:bg-blue-900/30' : ''}`}
-        onClick={() => onFocus(row.segmentId)}
+        onClick={() => onFocus(row.segmentIds[0])}
       >
         <TypeBadge type="TOKEN" />
         <span className="flex-1 truncate text-zinc-600 dark:text-zinc-400">
-          Streamed <strong className="text-zinc-800 dark:text-zinc-200">{row.totalTokens}</strong>{' '}
+          Streamed{' '}
+          <strong className="text-zinc-800 dark:text-zinc-200">{row.totalTokens}</strong>{' '}
           tokens
           <span className="ml-1 text-zinc-400">({fmtMs(row.durationMs)})</span>
         </span>
@@ -150,25 +167,14 @@ export const TokenGroupRowView = memo(function TokenGroupRowView({
           {expanded ? '▲' : '▼'}
         </button>
       </div>
+
       {expanded && (
         <div className="border-t border-zinc-100 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/50">
-          {/* Full streamed text */}
-          {row.textContent ? (
-            <p className="mb-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+          {row.textContent && (
+            <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300">
               {row.textContent}
             </p>
-          ) : null}
-          {/* Per-batch breakdown */}
-          <div className="border-t border-zinc-100 pt-1 dark:border-zinc-800">
-            {row.events.map((ev) => (
-              <div key={ev.id} className="flex items-center gap-2 py-0.5">
-                <span className="w-5 text-right font-mono text-zinc-300 dark:text-zinc-600">{ev.seq}</span>
-                <span className="text-zinc-500 dark:text-zinc-400">
-                  ×{(ev.payload.count as number | undefined) ?? 1} tokens
-                </span>
-              </div>
-            ))}
-          </div>
+          )}
         </div>
       )}
     </div>
@@ -257,6 +263,38 @@ export const ToolResultRowView = memo(function ToolResultRowView({
       <TypeBadge type="TOOL_RESULT" />
       <span className="truncate font-mono text-[9px] text-zinc-400 dark:text-zinc-500">
         {row.callId.slice(0, 8)}
+      </span>
+    </RowWrapper>
+  );
+});
+
+// ── Ping/Pong row ─────────────────────────────────────────────────────────────
+
+interface PingPongProps {
+  row: PingPongRow;
+  isActive: boolean;
+  onFocus: (segmentId: string | undefined) => void;
+  rowRef?: React.Ref<HTMLDivElement>;
+}
+
+export const PingPongRowView = memo(function PingPongRowView({
+  row,
+  isActive,
+  onFocus,
+  rowRef,
+}: PingPongProps) {
+  const hasPong = row.pongEvent !== undefined;
+  return (
+    <RowWrapper isActive={isActive} onClick={() => onFocus(undefined)} rowRef={rowRef}>
+      <span className="w-5 shrink-0 text-right font-mono text-zinc-300 dark:text-zinc-600">
+        {row.pingEvent.seq >= 0 ? row.pingEvent.seq : ''}
+      </span>
+      <span className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${TYPE_COLOURS['PING']}`}>
+        PING
+      </span>
+      <span className="text-zinc-300 dark:text-zinc-600">/</span>
+      <span className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${hasPong ? TYPE_COLOURS['PONG'] : 'bg-red-50 text-red-400 dark:bg-red-900/20 dark:text-red-400'}`}>
+        {hasPong ? 'PONG' : 'PONG?'}
       </span>
     </RowWrapper>
   );

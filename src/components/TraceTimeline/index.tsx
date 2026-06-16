@@ -7,9 +7,12 @@ import {
   TokenGroupRowView,
   ToolCallRowView,
   ToolResultRowView,
+  PingPongRowView,
   OtherRowView,
   type DisplayRow,
   type ToolCallRow,
+  type TokenGroupRow,
+  type PingPongRow,
 } from './TimelineRow';
 
 interface Props {
@@ -51,6 +54,15 @@ function resolveSegmentId(
 
 /**
  * Merge consecutive TOKEN events into token-group rows; keep other events as-is.
+ * Then merge ALL token_group rows into a single summary row so the timeline shows
+ * one "Streamed N tokens" entry per stream rather than one per text segment.
+ *
+ * Why merge after building instead of during: tool calls flush the in-progress
+ * token run (to preserve ordering), which would produce two token_group rows for
+ * a script like "report" (tokens → tool_call → tokens). The merge pass runs after
+ * the full row list is built, so ordering of tool_call rows is preserved while all
+ * token data is collapsed into a single summary.
+ *
  * O(n events). Wrapped in useMemo — only recomputes when events or textSegments change.
  */
 function buildDisplayRows(
@@ -59,10 +71,9 @@ function buildDisplayRows(
 ): DisplayRow[] {
   const rows: DisplayRow[] = [];
   let tokenRun: TraceEvent[] | null = null;
-  // Pending tool call rows keyed by callId — waiting for their matching TOOL_RESULT.
-  // Events that arrive between TOOL_CALL and TOOL_RESULT are held in interstitialBuffer
-  // and flushed into rows AFTER the paired tool_call row is finalised.
   const pendingToolCalls = new Map<string, { rowIndex: number; interstitial: TraceEvent[] }>();
+  // PING seq → index in rows[] so PONG can attach to the right row
+  const pendingPings = new Map<number, number>();
 
   const flushTokenRun = () => {
     if (!tokenRun || tokenRun.length === 0) return;
@@ -72,21 +83,12 @@ function buildDisplayRows(
       (sum, ev) => sum + ((ev.payload.count as number | undefined) ?? 1),
       0,
     );
-    // Resolve which TextSegment this group belongs to via seq-range matching.
-    // Falls back to the stored payload field in case textSegments are not yet
-    // fully populated (e.g. mid-stream snapshot).
     const segmentId =
       resolveSegmentId(textSegments, first.seq) ??
       (last.payload.segmentId as string | undefined);
-
-    // Include the text content so the expanded view can show it
     const matchedSeg = segmentId
       ? textSegments.find((s) => s.id === segmentId)
       : undefined;
-
-    // Streaming time = when the last token in this group arrived at the WebSocket
-    // minus when the first token arrived — measures actual server delivery time,
-    // not React processing time. Falls back to reducer timestamps if not present.
     const firstArrival = (first.payload.firstArrivalTs as number | undefined) ?? first.timestamp;
     const lastArrival  = (last.payload.lastArrivalTs   as number | undefined) ?? last.timestamp;
 
@@ -97,7 +99,7 @@ function buildDisplayRows(
       totalTokens,
       durationMs: lastArrival - firstArrival,
       startTs: firstArrival,
-      segmentId,
+      segmentIds: segmentId ? [segmentId] : [],
       textContent: matchedSeg?.content,
     });
     tokenRun = null;
@@ -119,33 +121,39 @@ function buildDisplayRows(
           callId,
           toolName: (ev.payload.toolName as string) ?? '',
         });
-        // Register as pending — interstitial events (PING/PONG etc.) will be buffered
         pendingToolCalls.set(callId, { rowIndex, interstitial: [] });
       } else if (ev.type === 'TOOL_RESULT') {
         const callId = (ev.payload.callId as string) ?? '';
         const pending = pendingToolCalls.get(callId);
         if (pending) {
-          // Attach result directly onto the call row so they always render together
           (rows[pending.rowIndex] as ToolCallRow).resultEvent = ev;
           pendingToolCalls.delete(callId);
-          // Flush buffered interstitial events (PING/PONG etc.) AFTER the pair
           for (const ie of pending.interstitial) {
             rows.push({ kind: 'other', id: ie.id, event: ie });
           }
         } else {
-          // Orphaned TOOL_RESULT (e.g. after reconnect replay) — render standalone
-          rows.push({
-            kind: 'tool_result',
-            id: ev.id,
-            event: ev,
-            callId,
-          });
+          rows.push({ kind: 'tool_result', id: ev.id, event: ev, callId });
+        }
+      } else if (ev.type === 'PING') {
+        const rowIndex = rows.length;
+        rows.push({ kind: 'ping_pong', id: ev.id, pingEvent: ev });
+        pendingPings.set(ev.seq, rowIndex);
+      } else if (ev.type === 'PONG') {
+        // Attach to the most recent unmatched PING (seq on PONG is its own seq, not the ping's)
+        // We match by insertion order: the latest pendingPing entry
+        let matched = false;
+        for (const [pingSeq, rowIndex] of pendingPings) {
+          (rows[rowIndex] as PingPongRow).pongEvent = ev;
+          pendingPings.delete(pingSeq);
+          matched = true;
+          break;
+        }
+        if (!matched) {
+          rows.push({ kind: 'other', id: ev.id, event: ev });
         }
       } else {
-        // Check if this event arrives between a TOOL_CALL and its TOOL_RESULT
         const activePending = [...pendingToolCalls.values()];
         if (activePending.length > 0) {
-          // Buffer it — emit after the tool pair is complete
           activePending[activePending.length - 1]!.interstitial.push(ev);
         } else {
           rows.push({ kind: 'other', id: ev.id, event: ev });
@@ -154,14 +162,66 @@ function buildDisplayRows(
     }
   }
   flushTokenRun();
-  // Flush interstitial events for any tool calls still awaiting their TOOL_RESULT
-  // (mid-stream snapshot — result hasn't arrived yet)
   for (const { interstitial } of pendingToolCalls.values()) {
     for (const ie of interstitial) {
       rows.push({ kind: 'other', id: ie.id, event: ie });
     }
   }
-  return rows;
+
+  return mergeTokenGroups(rows);
+}
+
+/**
+ * Post-processing: collapse all token_group rows into a single summary row.
+ *
+ * Result: one "Streamed N tokens (Xs)" row per stream, regardless of how many
+ * text segments the response has (e.g. tokens before + after a tool call).
+ * Expanding the row shows the full concatenated response text.
+ *
+ * Non-token rows (tool_call, PING/PONG, STREAM_END, etc.) remain in their
+ * original positions. If there is only one token_group, it is returned as-is.
+ */
+function mergeTokenGroups(rows: DisplayRow[]): DisplayRow[] {
+  const tokenRows = rows.filter((r): r is TokenGroupRow => r.kind === 'token_group');
+  if (tokenRows.length <= 1) return rows;
+
+  const totalTokens = tokenRows.reduce((s, r) => s + r.totalTokens, 0);
+  const startTs     = Math.min(...tokenRows.map((r) => r.startTs));
+  const durationMs  = Math.max(...tokenRows.map((r) => r.startTs + r.durationMs)) - startTs;
+  const allEvents   = tokenRows.flatMap((r) => r.events);
+  // Concatenate text from all segments (separated by a single space to avoid run-on words)
+  const textContent = tokenRows
+    .map((r) => r.textContent ?? '')
+    .filter(Boolean)
+    .join(' ');
+
+  // Collect all segment IDs across the merged rows (preserving order).
+  // Used for bidirectional highlight: the merged row highlights in the timeline
+  // when ANY of its TextSegments is active in the chat.
+  const segmentIds = tokenRows.flatMap((r) => r.segmentIds);
+
+  const merged: TokenGroupRow = {
+    kind: 'token_group',
+    id: tokenRows[0]!.id,
+    events: allEvents,
+    totalTokens,
+    durationMs,
+    startTs,
+    segmentIds,
+    textContent: textContent || undefined,
+  };
+
+  // Insert merged row at the position of the first token_group; drop the rest
+  const result: DisplayRow[] = [];
+  let inserted = false;
+  for (const row of rows) {
+    if (row.kind === 'token_group') {
+      if (!inserted) { result.push(merged); inserted = true; }
+    } else {
+      result.push(row);
+    }
+  }
+  return result;
 }
 
 // ─── Row renderer (memo'd to prevent full-list re-renders on every token) ────
@@ -190,6 +250,9 @@ const RowRenderer = memo(function RowRenderer({
   }
   if (row.kind === 'tool_result') {
     return <ToolResultRowView row={row} isActive={isActive} onFocus={focus} rowRef={rowRef} />;
+  }
+  if (row.kind === 'ping_pong') {
+    return <PingPongRowView row={row} isActive={isActive} onFocus={focus} rowRef={rowRef} />;
   }
   return <OtherRowView row={row} isActive={isActive} onFocus={focus} rowRef={rowRef} />;
 });
@@ -230,6 +293,7 @@ export const TraceTimeline = memo(function TraceTimeline({
       // ── Type filter ──────────────────────────────────────────────────────
       if (typeFilter !== 'ALL') {
         if (row.kind === 'token_group' && typeFilter !== 'TOKEN') continue;
+        if (row.kind === 'ping_pong' && typeFilter !== 'PING/PONG') continue;
         if (row.kind === 'other' && row.event.type !== typeFilter) continue;
         if (row.kind === 'tool_result' && typeFilter !== 'TOOL_RESULT') continue;
 
@@ -253,11 +317,12 @@ export const TraceTimeline = memo(function TraceTimeline({
       if (searchFilter) {
         const haystack =
           row.kind === 'token_group'
-            // Search the actual streamed text + metadata
-            ? `TOKEN ${row.totalTokens} ${row.segmentId ?? ''} ${row.textContent ?? ''}`
+            ? `TOKEN ${row.totalTokens} ${row.segmentIds.join(' ')} ${row.textContent ?? ''}`
+            : row.kind === 'ping_pong'
+            ? `PING PONG ${row.pingEvent.seq}`
             : JSON.stringify(
                 row.kind === 'tool_call' || row.kind === 'tool_result'
-                  ? row.event.payload   // includes result object now
+                  ? row.event.payload
                   : row.kind === 'other' ? row.event.payload : '',
               );
         if (!haystack.toLowerCase().includes(searchFilter.toLowerCase())) continue;
@@ -274,9 +339,9 @@ export const TraceTimeline = memo(function TraceTimeline({
   const activeRowId = useMemo(() => {
     if (!activeSegmentId) return null;
     for (const row of filteredRows) {
-      if (row.kind === 'token_group'  && row.segmentId === activeSegmentId) return row.id;
-      if (row.kind === 'tool_call'    && row.callId    === activeSegmentId) return row.id;
-      if (row.kind === 'tool_result'  && row.callId    === activeSegmentId) return row.id;
+      if (row.kind === 'token_group'  && row.segmentIds.includes(activeSegmentId)) return row.id;
+      if (row.kind === 'tool_call'    && row.callId === activeSegmentId) return row.id;
+      if (row.kind === 'tool_result'  && row.callId === activeSegmentId) return row.id;
     }
     return null;
   }, [filteredRows, activeSegmentId]);

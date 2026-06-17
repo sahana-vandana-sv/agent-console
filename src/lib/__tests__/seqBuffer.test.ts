@@ -128,6 +128,23 @@ describe('seqBuffer', () => {
     expect(buf.hasPending()).toBe(false);
   });
 
+  it('STREAM_END bypasses dedup so replayed STREAM_END is never silently dropped', () => {
+    const buf = createSeqBuffer();
+    // Simulate original connection: tokens arrive and STREAM_END is processed
+    buf.add(token(1));
+    buf.add(token(2));
+    const se: ServerMessage = { type: 'STREAM_END', seq: 3, stream_id: 's1' };
+    buf.add(se);   // seq=3 added to seen
+
+    // Reconnect: trimAfter(3) — STREAM_END seq=3 is <= lastRendered so it stays in seen
+    buf.trimAfter(3);
+
+    // Server replays the STREAM_END — must NOT be dropped by dedup
+    const out = buf.add(se);
+    expect(out).toHaveLength(1);
+    expect(out[0].type).toBe('STREAM_END');
+  });
+
   it('trimAfter evicts seen entries above lastRendered and resets nextExpected', () => {
     const buf = createSeqBuffer();
     buf.add(token(1)); // rendered — committed

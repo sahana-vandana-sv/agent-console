@@ -96,14 +96,17 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
 
     // ── User sends a new message — full reset ──────────────────────────────
     case 'USER_MESSAGE_SENT':
-      return makeInitialState();
+      return { ...makeInitialState(), phase: 'CONNECTING' };
 
     // ── WebSocket opened (initial connection) ──────────────────────────────
     case 'WS_OPEN':
-      return { ...state, phase: 'CONNECTING', error: null };
+      return { ...state, phase: 'CONNECTED', error: null };
 
     // ── WebSocket closed / dropped ─────────────────────────────────────────
     case 'WS_CLOSE':
+      if (state.phase === 'STREAM_END' || state.phase === 'IDLE') {
+        return state;
+      }
       return {
         ...state,
         phase: 'RECONNECTING',
@@ -113,10 +116,6 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
     // ── Reconnect succeeded; about to send RESUME ──────────────────────────
     case 'RECONNECT_SUCCESS':
       return { ...state, phase: 'RESUMING' };
-
-    // ── Replay complete after RESUME ───────────────────────────────────────
-    case 'REPLAY_COMPLETE':
-      return { ...state, phase: 'STREAMING' };
 
     // ── Seq gap detected (chaos buffering) ────────────────────────────────
     case 'SEQ_GAP_DETECTED':
@@ -140,7 +139,7 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
         seq: maxSeq,
         payload: { count: action.tokens.length, streamId: action.streamId, segmentId, firstArrivalTs: action.firstArrivalTs, lastArrivalTs: action.lastArrivalTs },
       });
-      const nextPhase = state.phase === 'CONNECTED' || state.phase === 'RESUMING'
+      const nextPhase = state.phase === 'RESUMING'
         ? 'STREAMING'
         : state.phase === 'TOOL_PENDING'
           ? state.phase   // tool card still open — don't change phase

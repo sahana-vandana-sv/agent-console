@@ -84,7 +84,10 @@ export default function Home() {
             />
             <button
               type="submit"
-              disabled={!input.trim()}
+              disabled={
+                !input.trim() ||
+                ['STREAMING', 'BUFFERING', 'TOOL_PENDING'].includes(state.phase)
+              }
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
             >
               Send

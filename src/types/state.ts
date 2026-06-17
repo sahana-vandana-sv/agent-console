@@ -64,7 +64,6 @@ export type AgentAction =
   | { type: 'SEQ_GAP_DETECTED' }
   | { type: 'SEQ_GAP_FILLED' }
   | { type: 'RECONNECT_SUCCESS' }
-  | { type: 'REPLAY_COMPLETE' }
   | { type: 'ERROR'; code: string; message: string }
   | { type: 'PING_RECEIVED'; seq: number; challenge: string }
   | { type: 'PONG_SENT'; echo: string };

@@ -32,7 +32,7 @@ export function StreamingChat({ segments, phase, activeSegmentId, onSegmentFocus
   if (segments.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">
-        {phase === 'IDLE' || phase === 'CONNECTING'
+        {phase === 'IDLE' || phase === 'CONNECTED'
           ? 'Send a message to start…'
           : 'Waiting for response…'}
       </div>

@@ -49,8 +49,14 @@ let nextExpected = 1;
 
   return {
     add(msg: ServerMessage): ServerMessage[] {
-      // PING and ERROR bypass ordering entirely — deliver immediately, no dedup.
-      if (msg.type === 'PING' || msg.type === 'ERROR') return [msg];
+      // PING, ERROR, and STREAM_END bypass ordering and dedup — deliver immediately.
+      // STREAM_END must bypass dedup because its seq is already in `seen` from the
+      // original connection. trimAfter() only evicts seqs > lastRendered, so a
+      // STREAM_END that was processed before the drop keeps its seq in `seen` and
+      // would be silently dropped during replay — forcing the 9500ms idle timer as
+      // the only path to end the stream. Bypassing dedup ensures the replayed
+      // STREAM_END always reaches dispatchMessage(), which is idempotent.
+      if (msg.type === 'PING' || msg.type === 'ERROR' || msg.type === 'STREAM_END') return [msg];
 
       // TOOL_CALL bypasses ordering (still deduped by seq) so TOOL_ACK can be
       // sent within the 2s window regardless of seq gaps or latency spikes.

@@ -9,13 +9,13 @@ const BACKOFF           = [500, 1000, 2000, 4000, 10000] as const;
 const GAP_TIMEOUT_MS    = 3000;
 // After RESUME, the server replays history but never continues execution.
 // STREAM_END may never arrive. Hard upper-bound timeout:
-const REPLAY_TIMEOUT_MS = 20000;
-// If no message arrives for this long after the last NEW replayed event
-// (seq > resumeLastSeq), treat replay as silently complete.
-// Must exceed the chaos-mode max latency spike (8 000 ms) so a spike between
-// two consecutive replayed messages doesn't falsely end the stream.
-// 9 500 ms = 8 000 ms max spike + 1 500 ms margin.
-const REPLAY_IDLE_MS = 9500;
+const REPLAY_TIMEOUT_MS = 15000;
+// If no message arrives for this long during replay, treat it as complete.
+// Replay uses rawSend (bypasses chaos engine) so live-stream latency spikes
+// (up to 8s) do NOT apply. However large payloads (550KB context snapshots)
+// can cause >1s gaps between consecutive rawSend calls on a loaded machine.
+// 3000ms matches the gap timer and is safe for any localhost processing delay.
+const REPLAY_IDLE_MS = 3000;
 
 export class AgentProtocol {
   private ws: WebSocket | null = null;
@@ -36,8 +36,17 @@ export class AgentProtocol {
   // that arrives AFTER the timer fires (but before the connection closes) from
   // triggering yet another reconnect. Reset only when the user sends a new message.
   private replayCompleted   = false;
+  // Set on every STREAM_END dispatch (natural or via replay timers). Prevents
+  // chaos from dropping the post-stream connection and triggering a RESUME loop
+  // (the stream is done — reconnecting would just replay the same STREAM_END).
+  // Reset only in sendUserMessage() so the next turn reconnects normally.
+  private streamComplete    = false;
   private reconnectAttempt  = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Buffered USER_MESSAGE content when sendUserMessage() is called while ws is
+  // null (connection dropped after stream end, no reconnect was scheduled).
+  // Sent in onOpen() on the fresh connection.
+  private pendingUserMessage: string | null = null;
 
   private seqBuf       = createSeqBuffer();
   private gapTimer:    ReturnType<typeof setTimeout> | null = null;
@@ -95,17 +104,23 @@ export class AgentProtocol {
 
   sendUserMessage(content: string): void {
     this.sessionStarted = true;
-    // Reset seq tracking for the new turn BEFORE sending.
-    // The ref is owned by useWebSocket and will be reset to 0 when the
-    // USER_MESSAGE_SENT reducer action clears lastProcessedSeq in state.
-    // We don't mutate the ref here — the reducer owns the value.
     this.seqBuf.reset();
     this.clearGapTimer();
     this.clearReplayTimer();
-    this.replayCompleted = false;   // new turn — allow reconnects again
-    this.flushTokenBatch();   // discard any stale batch
+    this.replayCompleted = false;
+    this.streamComplete  = false;
+    this.flushTokenBatch();
     this.dispatch({ type: 'USER_MESSAGE_SENT' });
-    this.send({ type: 'USER_MESSAGE', content });
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Connection was dropped after stream completed (no reconnect was scheduled
+      // because streamComplete suppressed it). Buffer the message and open a fresh
+      // connection — onOpen() will send it.
+      this.pendingUserMessage = content;
+      this.isReconnecting = false;   // NOT a RESUME reconnect — fresh connection
+      this.connect();
+    } else {
+      this.send({ type: 'USER_MESSAGE', content });
+    }
   }
 
 destroy(): void {
@@ -114,10 +129,12 @@ destroy(): void {
     this.replayIdleTimer && clearTimeout(this.replayIdleTimer);
     this.tokenBatchTimer && cancelAnimationFrame(this.tokenBatchTimer);
     this.replayTimer     && clearTimeout(this.replayTimer);
-    this.isReconnecting  = false;   // prevent stale flag on next connect()
-    this.isReplaying     = false;
-    this.replayCompleted = false;
-    this.sessionStarted  = false;
+    this.isReconnecting      = false;
+    this.isReplaying         = false;
+    this.replayCompleted     = false;
+    this.streamComplete      = false;
+    this.sessionStarted      = false;
+    this.pendingUserMessage  = null;
     this.ws?.close();
     this.ws = null;
   }
@@ -154,8 +171,13 @@ destroy(): void {
       // STREAM_END may never arrive — give up after REPLAY_TIMEOUT_MS.
       this.armReplayTimer();
     } else {
-      this.isReconnecting = false;   // clean up any stale flag
+      this.isReconnecting = false;
       this.dispatch({ type: 'WS_OPEN' });
+      if (this.pendingUserMessage !== null) {
+        const content = this.pendingUserMessage;
+        this.pendingUserMessage = null;
+        this.send({ type: 'USER_MESSAGE', content });
+      }
     }
   }
 
@@ -164,12 +186,11 @@ destroy(): void {
     this.replayTimer = setTimeout(() => {
       this.replayTimer     = null;
       this.isReplaying     = false;
-      this.replayCompleted = true;   // ← keeps onClose from reconnecting even after timer fires
-      // Force-flush any buffered seq messages, then signal stream end.
+      this.replayCompleted = true;
+      this.streamComplete  = true;
       const flushed = this.seqBuf.flush();
       for (const m of flushed) this.dispatchMessage(m);
       this.flushTokenBatch();
-      // Use a known stream_id sentinel — reducer treats any STREAM_END as finalising.
       this.dispatch({ type: 'STREAM_END', streamId: '__replay_timeout__' });
     }, REPLAY_TIMEOUT_MS);
   }
@@ -185,6 +206,7 @@ destroy(): void {
       if (this.replayTimer !== null) { clearTimeout(this.replayTimer); this.replayTimer = null; }
       this.isReplaying     = false;
       this.replayCompleted = true;
+      this.streamComplete  = true;
       const flushed = this.seqBuf.flush();
       for (const m of flushed) this.dispatchMessage(m);
       this.flushTokenBatch();
@@ -259,7 +281,7 @@ destroy(): void {
     this.flushTokenBatch();
     this.dispatch({ type: 'WS_CLOSE' });
 
-    if (this.isReplaying || this.replayCompleted) {
+    if (this.isReplaying || this.replayCompleted || this.streamComplete) {
       // Two cases — both must skip reconnect:
       // 1. isReplaying: drop arrived before replay timer fired. Timer will
       //    force-flush and dispatch STREAM_END — no reconnect needed.
@@ -410,7 +432,11 @@ destroy(): void {
           console.log('%c✅ REPLAY: accepting already-completed STREAM_END', 'color:#22c55e',
             `seq=${msg.seq} resumeLastSeq=${this.resumeLastSeq} — stream was done before drop`);
         }
-        this.clearReplayTimer();    // cancel replay timers — stream is definitively done
+          // Cancel timers without resetting replayCompleted (clearReplayTimer resets it).
+        if (this.replayTimer !== null) { clearTimeout(this.replayTimer); this.replayTimer = null; }
+        if (this.replayIdleTimer !== null) { clearTimeout(this.replayIdleTimer); this.replayIdleTimer = null; }
+        this.isReplaying    = false;
+        this.streamComplete = true;
         this.flushTokenBatch();
         this.dispatch({ type: 'STREAM_END', streamId: msg.stream_id });
         break;

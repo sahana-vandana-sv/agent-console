@@ -37,16 +37,6 @@ function JsonCollapse({ value, label }: { value: unknown; label: string }) {
 export const ToolCard = memo(function ToolCard({ segment, isActive, onClick }: Props) {
   const isPending = segment.status === 'pending';
   const ref = useRef<HTMLDivElement>(null);
-  // 🃏 RENDER COUNTER — only 2 renders expected: mount (pending) + TOOL_RESULT (resolved)
-  // Any other re-render means memo isn't working or props changed unexpectedly
-  const renderCount = useRef(0);
-  renderCount.current += 1;
-  console.log(
-    '%c🃏 ToolCard RENDER', 'color:#f59e0b',
-    `id=${segment.id} render#${renderCount.current} status=${segment.status}`,
-    renderCount.current > 2 ? '⚠️ UNEXPECTED RE-RENDER' : ''
-  );
-
   // Scroll into view when the timeline activates this card
   useEffect(() => {
     if (isActive) {

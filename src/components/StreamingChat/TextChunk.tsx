@@ -14,15 +14,6 @@ interface Props {
  */
 export const TextChunk = memo(function TextChunk({ segment, isActive, onClick }: Props) {
   const ref = useRef<HTMLParagraphElement>(null);
-  // 🖼️ RENDER COUNTER — open Chrome DevTools → Console, filter by "🖼️"
-  // memo should prevent re-renders of FROZEN segments (those before a TOOL_CALL)
-  const renderCount = useRef(0);
-  renderCount.current += 1;
-  console.log(
-    '%c🖼️ TextChunk RENDER', 'color:#34d399',
-    `id=${segment.id} render#${renderCount.current} chars=${segment.content.length} isActive=${isActive}`,
-    renderCount.current > 1 ? '← RE-RENDER' : '← first render'
-  );
 
   // Scroll into view when the timeline activates this segment
   useEffect(() => {

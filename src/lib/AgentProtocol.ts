@@ -127,7 +127,6 @@ destroy(): void {
   private send(msg: ClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       // 📤 CLIENT → SERVER
-      console.log('%c📤 CLIENT→SERVER', 'color:#22c55e;font-weight:bold', msg);
       this.ws.send(JSON.stringify(msg));
     }
   }
@@ -179,8 +178,6 @@ destroy(): void {
     this.replayIdleTimer = setTimeout(() => {
       this.replayIdleTimer = null;
       if (!this.isReplaying) return;   // natural STREAM_END already cleared it
-      console.log('%c⏱ REPLAY IDLE', 'color:#f97316;font-weight:bold',
-        `No message for ${REPLAY_IDLE_MS}ms — forcing STREAM_END`);
       // Cancel the hard timeout — idle detector fired first
       if (this.replayTimer !== null) { clearTimeout(this.replayTimer); this.replayTimer = null; }
       this.isReplaying     = false;
@@ -207,8 +204,6 @@ destroy(): void {
 
   private onMessage(raw: string): void {
     const msg = unsafeJsonParse(raw) as ServerMessage;
-    // 📥 SERVER → CLIENT (raw, before seq ordering)
-    console.log('%c📥 SERVER→CLIENT', 'color:#60a5fa;font-weight:bold', `seq=${msg.seq} type=${msg.type}`, msg);
 
     // During replay: arm the idle timer on EVERY message (not just new events).
     // Previously the idle timer was gated on replayNewEventSeen — this caused a
@@ -231,14 +226,6 @@ destroy(): void {
     }
 
     const ready = this.seqBuf.add(msg);
-
-    if (ready.length === 0) {
-      // 🕐 SEQ BUFFER: message held — waiting for gap to fill
-      console.log('%c🕐 SEQ BUFFER', 'color:#f59e0b;font-weight:bold', `seq=${msg.seq} HELD (gap — waiting for contiguous run)`);
-    } else if (ready.length > 1) {
-      // 🔓 SEQ BUFFER: multiple messages drained at once (chaos flush or gap filled)
-      console.log('%c🔓 SEQ BUFFER', 'color:#a78bfa;font-weight:bold', `DRAINED ${ready.length} messages: seqs=[${ready.map(m=>m.seq).join(',')}]`);
-    }
 
     for (const m of ready) {
       this.dispatchMessage(m);
@@ -331,20 +318,12 @@ destroy(): void {
         this.tokenBatch.push({ seq: msg.seq, text: msg.text });
         this.tokenBatchStreamId = msg.stream_id;
         if (this.tokenBatchTimer === null) {
-          // 🎨 rAF ARMED: next browser paint will flush the token batch
-          console.log('%c🎨 rAF ARMED', 'color:#f472b6;font-weight:bold', `seq=${msg.seq} text="${msg.text}" — batch will flush at next paint`);
           this.tokenBatchTimer = requestAnimationFrame(() => this.flushTokenBatch());
-        } else {
-          // Token arrived before rAF fired — accumulated into same batch
-          console.log('%c➕ TOKEN ACCUMULATED', 'color:#fb923c', `seq=${msg.seq} text="${msg.text}" — batch size now ${this.tokenBatch.length}`);
         }
         break;
       }
 
       case 'TOOL_CALL': {
-        // Flush any pending tokens FIRST so the text segment is frozen at the
-        // exact boundary before the tool card appears.
-        console.log('%c🔧 TOOL_CALL received', 'color:#f59e0b;font-weight:bold', `call_id=${msg.call_id} tool=${msg.tool_name} — flushing token batch first to freeze text`);
         this.flushTokenBatch();
         this.dispatch({
           type: 'TOOL_CALL',
@@ -368,7 +347,6 @@ destroy(): void {
         // If a TOOL_CALL passes dedup during replay (seq > resumeLastSeq) the
         // original ACK was never delivered — send a fresh ACK.
         if (!this.isReplaying || msg.seq > this.resumeLastSeq) {
-          console.log('%c✅ TOOL_ACK sent', 'color:#22c55e;font-weight:bold', `call_id=${msg.call_id}`);
           this.send({ type: 'TOOL_ACK', call_id: msg.call_id });
         }
         break;
@@ -406,10 +384,6 @@ destroy(): void {
         // relied on the idle timer to finish the stream. That caused a 9.5 s delay
         // in the common "stream completed before drop" case and also fired
         // prematurely when latency spikes created >500 ms gaps mid-replay.
-        if (this.isReplaying && msg.seq <= this.resumeLastSeq) {
-          console.log('%c✅ REPLAY: accepting already-completed STREAM_END', 'color:#22c55e',
-            `seq=${msg.seq} resumeLastSeq=${this.resumeLastSeq} — stream was done before drop`);
-        }
         this.clearReplayTimer();    // cancel replay timers — stream is definitively done
         this.flushTokenBatch();
         this.dispatch({ type: 'STREAM_END', streamId: msg.stream_id });
@@ -429,12 +403,6 @@ destroy(): void {
       this.tokenBatchTimer = null;
     }
     if (this.tokenBatch.length === 0) return;
-    // 🚀 rAF FIRED → dispatching TOKENS_BATCH to React reducer
-    console.log(
-      '%c🚀 rAF FLUSH → TOKENS_BATCH', 'color:#f472b6;font-weight:bold',
-      `${this.tokenBatch.length} token(s): "${this.tokenBatch.map(t=>t.text).join('')}"`,
-      `seqs=[${this.tokenBatch.map(t=>t.seq).join(',')}]`
-    );
     this.dispatch({
       type: 'TOKENS_BATCH',
       tokens: this.tokenBatch,

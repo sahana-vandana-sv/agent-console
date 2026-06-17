@@ -18,13 +18,43 @@ A record of every architectural decision made, every chaos bug found and fixed, 
 
 ---
 
-### 2. useReducer over Redux / Zustand ---> this must be in readme
+### 2. useReducer over Redux / Zustand
 
-**Decision:** Native `useReducer` with a typed `StreamState`.
+**Decision:** Native `useReducer` with a typed `StreamState`. No external state library.
 
-**Why:** Zero additional dependencies. The state shape is a single object that flows in one direction. Redux would add boilerplate (actions, reducers, store configuration) with no benefit for a single-consumer state tree. Zustand would be a reasonable alternative but introduces a runtime dependency for marginal ergonomic gain.
+**Why useReducer fits this problem exactly:**
 
-**Tradeoff:** Cannot use Redux DevTools for time-travel debugging. Acceptable — the TraceTimeline panel provides equivalent observability for this specific protocol.
+This app has one consumer of agent state (the page), one producer (the WebSocket), and a well-defined set of transitions driven by protocol events. The state machine is explicit:
+
+```
+IDLE → CONNECTING → CONNECTED → STREAMING ⇄ TOOL_PENDING
+     ↘ RECONNECTING → RESUMING ↗
+     BUFFERING (chaos gap)
+     STREAM_END
+```
+
+`useReducer` maps directly onto this: each protocol event becomes a dispatched action, each state transition is a pure function, and the action type doubles as the event log. The reducer is the state machine. There is no impedance mismatch.
+
+**Why not Redux:**
+
+Redux adds: a store singleton, a Provider, action creators, selectors, and middleware configuration — before writing a single line of domain logic. For a single-consumer state tree this is pure overhead. The canonical Redux argument is cross-component state sharing; here there is one component tree with one root that owns all agent state. Redux DevTools would be useful but the TraceTimeline panel provides equivalent protocol-level observability tailored to this specific domain.
+
+**Why not Zustand:**
+
+Zustand is the right call for multi-consumer state (many components subscribing independently) or state that needs to be read outside React (in a class, a worker, a utility). Neither applies here. `AgentProtocol` dispatches into React via the `dispatch` ref it receives at construction — it never needs to read state back. Adding Zustand would be a runtime dependency for marginal ergonomic gain.
+
+**Why this holds under chaos specifically:**
+
+Chaos introduces out-of-order delivery, duplicates, mid-stream drops, and replays. All of these are handled *before* `dispatch()` is called — in `AgentProtocol` and `seqBuffer`. By the time an action reaches the reducer, it is guaranteed to be:
+- In sequence order
+- Deduplicated
+- Correctly typed
+
+The reducer therefore never needs to handle "what if seq 7 arrives before seq 5" — that invariant is enforced at the boundary. This is what makes a simple `useReducer` viable under chaos: the complexity budget is spent in the protocol layer, not the state layer. Redux or Zustand would not have changed this; they would have added a layer without removing any of the protocol complexity.
+
+**What this costs:**
+
+No time-travel debugging via Redux DevTools. The TraceTimeline panel compensates by showing the full ordered event log with seq numbers, types, and payloads — effectively a domain-specific DevTools built for this protocol. The cost is real only during development; it does not affect production correctness.
 
 ---
 

@@ -59,6 +59,12 @@ let nextExpected = 1;
       if (msg.type === 'TOOL_CALL') {
         if (seen.has(msg.seq)) return [];   // duplicate — drop silently
         seen.add(msg.seq);
+        // Advance nextExpected so subsequent messages aren't stalled.
+        // Without this, seq=N TOOL_CALL bypasses the buffer but nextExpected
+        // stays at N — every message after it (seq=N+1, N+2…) gets held
+        // waiting for an N that will never appear in the buffer, triggering
+        // the 3s gap timer in normal mode.
+        if (msg.seq >= nextExpected) nextExpected = msg.seq + 1;
         return [msg];
       }
 

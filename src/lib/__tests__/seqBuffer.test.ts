@@ -112,6 +112,22 @@ describe('seqBuffer', () => {
     expect(out2).toHaveLength(0);
   });
 
+  it('TOOL_CALL bypass advances nextExpected so subsequent tokens are not stalled', () => {
+    const buf = createSeqBuffer();
+    buf.add(token(1));
+    buf.add(token(2));
+    // TOOL_CALL at seq=3 bypasses the buffer
+    const tc: ServerMessage = {
+      type: 'TOOL_CALL', seq: 3, call_id: 'c1',
+      tool_name: 'search', args: {}, stream_id: 's1',
+    };
+    buf.add(tc);
+    // seq=4 should drain immediately — not stall waiting for seq=3 in the buffer
+    const out = buf.add(token(4));
+    expect(out.map(m => m.seq)).toEqual([4]);
+    expect(buf.hasPending()).toBe(false);
+  });
+
   it('trimAfter evicts seen entries above lastRendered and resets nextExpected', () => {
     const buf = createSeqBuffer();
     buf.add(token(1)); // rendered — committed

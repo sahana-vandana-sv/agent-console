@@ -1,12 +1,6 @@
-# Agent Console
-
-A real-time AI agent console built in Next.js 14 (App Router) that connects to a mock AI agent backend over WebSocket, renders streaming token responses with mid-stream tool call interruptions, displays a live protocol trace timeline, and survives deliberate chaos — dropped connections, out-of-order messages, duplicate events, and corrupt heartbeats.
-
----
-
 ## Architecture
 
-The system is a **distributed systems problem with a render loop attached**, not a chat UI exercise. Three layers are kept strictly separate — no cross-boundary imports:
+The app is built around a strict three-layer separation: a pure TypeScript AgentProtocol class, a useReducer hook runs a typed state machine that translates protocol events into render state, and React components are purely read-only renderers.
 
 ```
 AgentProtocol (class, zero React imports)
@@ -19,86 +13,73 @@ React components
   — read-only render, no protocol logic
 ```
 
-**Core insight:** True reconnection recovery requires tracking what the DOM has *consumed* (`lastProcessedSeq`, advanced only when the reducer commits a state update and React re-renders), not what the socket has *received* (`seqBuf.seen`). These diverge during rAF token-batch windows and React's async render scheduling. On reconnect, `RESUME { last_seq }` is sent with the DOM-committed value, and `seqBuf.trimAfter()` evicts any socket-ahead-of-DOM entries so the server's replay reaches the client cleanly.
+<details>
+<summary>State diagram — inline SVG (for environments without Mermaid)</summary>
 
----
+<svg viewBox="0 0 820 620" width="100%" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>WebSocket State Machine</title>
+  <desc>State diagram showing transitions between IDLE, CONNECTING, STREAMING, TOOL_PENDING, BUFFERING, RECONNECTING, RESUMING, and STREAM_END</desc>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#94a3b8"/></marker>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#f87171"/></marker>
+    <marker id="ag" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#4ade80"/></marker>
+    <marker id="ap" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#a78bfa"/></marker>
+  </defs>
+  <!-- States -->
+  <rect x="360" y="20" width="100" height="36" rx="18" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="410" y="43" text-anchor="middle" font-size="12" font-weight="600" fill="#334155" font-family="sans-serif">IDLE</text>
+  <rect x="348" y="100" width="124" height="36" rx="18" fill="#e0f2fe" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="410" y="123" text-anchor="middle" font-size="12" font-weight="600" fill="#0369a1" font-family="sans-serif">CONNECTING</text>
+  <rect x="345" y="200" width="130" height="36" rx="18" fill="#dcfce7" stroke="#4ade80" stroke-width="1.5"/>
+  <text x="410" y="223" text-anchor="middle" font-size="12" font-weight="600" fill="#166534" font-family="sans-serif">STREAMING</text>
+  <rect x="560" y="200" width="130" height="36" rx="18" fill="#fef9c3" stroke="#facc15" stroke-width="1.5"/>
+  <text x="625" y="218" text-anchor="middle" font-size="11" font-weight="600" fill="#854d0e" font-family="sans-serif">TOOL_</text>
+  <text x="625" y="231" text-anchor="middle" font-size="11" font-weight="600" fill="#854d0e" font-family="sans-serif">PENDING</text>
+  <rect x="120" y="200" width="110" height="36" rx="18" fill="#fce7f3" stroke="#f472b6" stroke-width="1.5"/>
+  <text x="175" y="223" text-anchor="middle" font-size="12" font-weight="600" fill="#9d174d" font-family="sans-serif">BUFFERING</text>
+  <rect x="338" y="340" width="144" height="36" rx="18" fill="#fee2e2" stroke="#f87171" stroke-width="1.5"/>
+  <text x="410" y="363" text-anchor="middle" font-size="12" font-weight="600" fill="#991b1b" font-family="sans-serif">RECONNECTING</text>
+  <rect x="348" y="440" width="124" height="36" rx="18" fill="#ede9fe" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="410" y="463" text-anchor="middle" font-size="12" font-weight="600" fill="#5b21b6" font-family="sans-serif">RESUMING</text>
+  <rect x="348" y="540" width="124" height="36" rx="18" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="410" y="563" text-anchor="middle" font-size="12" font-weight="600" fill="#334155" font-family="sans-serif">STREAM_END</text>
+  <!-- Transitions -->
+  <line x1="410" y1="0" x2="410" y2="18" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="410" y1="56" x2="410" y2="98" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="415" y="82" font-size="9.5" fill="#64748b" font-family="sans-serif">USER_MESSAGE_SENT</text>
+  <line x1="410" y1="136" x2="410" y2="198" stroke="#4ade80" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="415" y="172" font-size="9.5" fill="#166534" font-family="sans-serif">ws.onopen</text>
+  <path d="M475,210 Q517,196 558,210" fill="none" stroke="#facc15" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="492" y="196" font-size="9" fill="#854d0e" font-family="sans-serif">TOOL_CALL</text>
+  <path d="M558,226 Q517,242 475,226" fill="none" stroke="#4ade80" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="492" y="248" font-size="9" fill="#166534" font-family="sans-serif">TOOL_RESULT</text>
+  <path d="M345,210 Q260,196 232,210" fill="none" stroke="#f472b6" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="256" y="196" font-size="9" fill="#9d174d" font-family="sans-serif">seq gap</text>
+  <path d="M232,226 Q260,242 345,226" fill="none" stroke="#4ade80" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="248" y="248" font-size="9" fill="#166534" font-family="sans-serif">gap filled / 3s</text>
+  <path d="M390,236 L390,338" fill="none" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ar)"/>
+  <text x="322" y="295" font-size="9" fill="#991b1b" font-family="sans-serif">ws.onerror/onclose</text>
+  <path d="M620,236 Q620,310 484,340" fill="none" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ar)"/>
+  <text x="584" y="296" font-size="9" fill="#991b1b" font-family="sans-serif">ws.drop</text>
+  <path d="M175,236 Q175,310 338,350" fill="none" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ar)"/>
+  <text x="158" y="296" font-size="9" fill="#991b1b" font-family="sans-serif">ws.drop</text>
+  <line x1="410" y1="376" x2="410" y2="438" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ap)"/>
+  <text x="415" y="398" font-size="9" fill="#5b21b6" font-family="sans-serif">ws.onopen · RESUME first</text>
+  <text x="415" y="409" font-size="9" fill="#5b21b6" font-family="sans-serif">trimAfter(lastSeq)</text>
+  <path d="M348,458 Q260,440 260,218 Q260,200 343,218" fill="none" stroke="#4ade80" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="170" y="360" font-size="9" fill="#166534" font-family="sans-serif">replay complete</text>
+  <text x="170" y="371" font-size="9" fill="#166534" font-family="sans-serif">(STREAM_END or 9.5s)</text>
+  <path d="M430,236 Q430,480 430,538" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="434" y="400" font-size="9" fill="#475569" font-family="sans-serif">STREAM_END</text>
+  <path d="M660,236 Q700,400 480,545" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="680" y="380" font-size="9" fill="#475569" font-family="sans-serif">STREAM_END</text>
+  <path d="M472,550 Q760,550 760,38 Q760,20 462,20" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#a)"/>
+  <text x="700" y="290" font-size="9" fill="#64748b" font-family="sans-serif" transform="rotate(90,700,290)">next USER_MESSAGE</text>
+</svg>
 
-## WebSocket State Machine
+**Legend:** green = normal flow · red dashed = connection drop · purple = reconnect/replay · yellow = tool call · pink = chaos buffering
 
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-
-    IDLE --> CONNECTING : USER_MESSAGE_SENT\n(lastProcessedSeq reset to 0)
-    CONNECTING --> STREAMING : ws.onopen
-
-    STREAMING --> TOOL_PENDING : TOOL_CALL received\n(text segment frozen)
-    TOOL_PENDING --> STREAMING : TOOL_RESULT received\n(all cards resolved)
-    STREAMING --> BUFFERING : seq gap detected\n(chaos out-of-order)
-    BUFFERING --> STREAMING : gap filled or\n3s timeout flush
-
-    STREAMING --> RECONNECTING : ws.onerror / ws.onclose\n(hard terminate fires onerror first)
-    TOOL_PENDING --> RECONNECTING : ws.onerror / ws.onclose\n(tool card stays visible: "running…")
-    BUFFERING --> RECONNECTING : ws.onerror / ws.onclose
-
-    RECONNECTING --> RESUMING : ws.onopen (backoff: 500ms→1s→2s→4s→10s)\nRESUME {last_seq} sent as FIRST message\nseqBuf.trimAfter(lastProcessedSeq)
-    RESUMING --> STREAMING : replay complete\n(STREAM_END received or 9.5s idle)
-
-    STREAMING --> STREAM_END : STREAM_END received
-    TOOL_PENDING --> STREAM_END : STREAM_END received
-    STREAM_END --> IDLE : user sends next message
-
-    note right of RECONNECTING
-        segments preserved in reducer
-        tool cards visible with pending status
-        chat panel remains interactive
-    end note
-
-    note right of RESUMING
-        replayed seqs ≤ resumeLastSeq → dropped by seen Set
-        replayed TOOL_CALL already in segments → idempotent skip
-        replayed STREAM_END → accepted immediately (stream was complete)
-        no STREAM_END in history → 9.5s idle timer backstop
-    end note
-```
-
-ASCII fallback for environments without Mermaid:
-
-```
-IDLE
- │ USER_MESSAGE_SENT (reset lastProcessedSeq=0)
- ▼
-CONNECTING
- │ ws.onopen
- ▼
-CONNECTED
- │ first TOKEN / CONTEXT_SNAPSHOT
- ▼
-STREAMING ◄────────────────────────────────────────────────┐
- │                 │                                        │
- │ TOOL_CALL       │ seq gap                    TOOL_RESULT │
- ▼                 ▼                                        │
-TOOL_PENDING    BUFFERING                                   │
- │   │            │ gap filled / 3s flush                   │
- │   └────────────┴───────────────────────────────────────► │
- │
- │ ws.onerror / ws.onclose  (from ANY active state)
- ▼
-RECONNECTING  ← segments frozen, tool cards stay, chat interactive
- │ ws.onopen  (exponential backoff: 500 → 1000 → 2000 → 4000 → 10000ms)
- ▼
-RESUMING
- │ RESUME {last_seq} sent FIRST (DOM-committed seq, not socket-received)
- │ seqBuf.trimAfter(resumeLastSeq) evicts socket-ahead-of-DOM entries
- │ replayed events stitched into existing segment list
- │ STREAM_END (replayed) → complete immediately
- │ no STREAM_END → 9.5s idle fires synthetic STREAM_END
- ▼
-STREAMING  (existing segments preserved, replay content appended)
- │
- ▼
-STREAM_END → IDLE
-```
+</details>
 
 ---
 
@@ -111,14 +92,14 @@ STREAM_END → IDLE
 
 ### 1. Start the agent server
 
-**Normal mode** (no chaos — use this first, verify `/log` shows no violations):
+**Normal mode**
 
 ```bash
 docker build -t agent-server ./agent-server
 docker run -p 4747:4747 agent-server
 ```
 
-**Chaos mode** (connection drops, out-of-order messages, duplicate events, corrupt heartbeats):
+**Chaos mode**
 
 ```bash
 docker run -p 4747:4747 agent-server --mode chaos
@@ -144,114 +125,16 @@ No environment variables required. WebSocket URL defaults to `ws://localhost:474
 
 ---
 
-## Trigger Keywords
+## Screenshots in normal mode
 
-Send these messages in the console to exercise specific protocol paths:
+### Full console — streaming chat, trace timeline, context panel
 
-| Message | Script | What it exercises |
-|---|---|---|
-| `hello` / `hi` | greeting | Tokens only, no tool calls — start here |
-| `report` / `q3` | report_summary | 1 tool call mid-stream + 2 CONTEXT_SNAPSHOTs (diff case) |
-| `analyze` / `compare` | multi_tool | 2 sequential tool calls, no CONTEXT updates between them |
-| `lookup` / `find` / `search` | lookup | TOOL_CALL fires **before any tokens** — edge case |
-| `large` / `schema` / `database` | large_context | ~550KB CONTEXT_SNAPSHOT + tool call + second snapshot |
-| `long` / `document` / `detailed` | long_response | ~60 tokens + 1 tool call |
-| _(anything else)_ | default | 1 tool call mid-stream |
+![Full console view showing streaming chat with tool cards on the left, trace timeline in the centre, and context inspector on the right](docs/screenshots/full-console.png)
 
----
+### Trace timeline — grouped tokens, tool call pairs, PING/PONG rows
 
-## Verification
+![Trace timeline showing a merged TOKEN group row, indented TOOL_CALL and TOOL_RESULT pairs linked by call_id, and PING/PONG rows at the bottom](docs/screenshots/trace-timeline.png)
 
-### Normal mode — must show zero violations
+### Context inspector — structural diff between two snapshots
 
-```bash
-# After sending several messages:
-curl http://localhost:4747/log | grep -i violation
-# Expected: (empty)
-```
-
-### Reset server state between test runs
-
-```bash
-curl http://localhost:4747/reset
-```
-
-### Chaos mode checklist
-
-Run these in chaos mode and verify the console recovers correctly:
-
-```bash
-# 1. Basic streaming — verify tokens render and no freeze
-#    Send: hello
-
-# 2. Tool call mid-stream — verify card shows "running…" during reconnect
-#    Send: analyze   (2 sequential tool calls)
-
-# 3. Tool before tokens — verify ToolCard renders before any text
-#    Send: lookup
-
-# 4. 550KB context snapshot — verify tab doesn't freeze, diff highlights
-#    Send: large
-
-# 5. Mid-stream drop + replay — verify text isn't duplicated after reconnect
-#    Send: long
-#    Toggle DevTools → Network → Offline during streaming, then back Online
-
-# After each scenario:
-curl http://localhost:4747/log | grep -i violation
-```
-
----
-
-## Project Structure
-
-```
-src/
-  app/
-    page.tsx                    # root layout, mounts useWebSocket
-  components/
-    StreamingChat/
-      index.tsx                 # renders segments array
-      TextChunk.tsx             # memo'd text segment
-      ToolCard.tsx              # memo'd tool card (pending → resolved)
-    TraceTimeline/
-      index.tsx                 # live protocol event log
-      TimelineRow.tsx           # individual event row
-      FilterBar.tsx             # type + content filter
-    ContextInspector/
-      index.tsx                 # snapshot history + diff
-      JsonTree.tsx              # lazily expanded JSON tree
-      DiffView.tsx              # added / changed / removed highlights
-      HistoryScrubber.tsx       # step through snapshot history
-    ConnectionStatus.tsx        # reconnect banner with backoff countdown
-  lib/
-    AgentProtocol.ts            # WebSocket class — zero React imports
-    seqBuffer.ts                # ordering + dedup — pure functions
-    jsonDiff.ts                 # structural JSON diff — pure functions
-    escape-hatch.ts             # only place `any` is permitted
-  hooks/
-    useAgentReducer.ts          # useReducer + all action/state types
-    useWebSocket.ts             # mounts AgentProtocol, dispatches to reducer
-  types/
-    protocol.ts                 # copied from agent-server/src/types.ts
-    state.ts                    # Segment, StreamState, ConnectionPhase
-```
-
----
-
-## Key Design Decisions
-
-See [`DECISIONS.md`](./DECISIONS.md) for the full record. Highlights:
-
-- **TOOL_CALL bypasses seq ordering** — holds in the buffer risks TOOL_ACK_TIMEOUT (2s window vs 8s chaos spike)
-- **`lastProcessedSeq` written during React render, not useEffect** — prevents stale RESUME seq when ws.onclose fires before post-commit effects
-- **`seqBuf.trimAfter(resumeLastSeq)`** — evicts socket-ahead-of-DOM entries so the server's replay isn't silently dropped by the dedup Set
-- **Replayed STREAM_END accepted immediately** — if the stream completed before the drop, we dispatch STREAM_END at once rather than waiting 9.5s for the idle timer
-- **PONG dedup per connection** — replayed PINGs from history don't trigger "unexpected PONG" violations on the new connection
-- **TOOL_CALL idempotency in reducer** — prevents duplicate ToolSegment if React's async render scheduling leaves the same callId dispatched twice across a reconnect
-
----
-
-## Known Protocol Race Condition
-
-If the connection drops after `TOOL_CALL` arrives but before `TOOL_ACK` reaches the server, and replay suppresses the ACK (correct — the call was processed, just the ACK was lost in transit), the server logs a `TOOL_ACK_TIMEOUT` violation even though the client behaved correctly. The server cannot distinguish "ACK sent but lost" from "ACK never sent." This is a protocol design gap, not a client bug. See `DECISIONS.md §Known Protocol Race Condition` for full analysis.
+![Context inspector showing snapshot 2 of 2 with green added badges for analysis_complete and flagged_issues, and an amber changed badge for the tables key](docs/screenshots/context-diff.png)

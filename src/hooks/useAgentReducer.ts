@@ -76,6 +76,22 @@ function applyTokensBatch(
 // ─── Reducer ────────────────────────────────────────────────────────────────
 
 function streamReducer(state: StreamState, action: AgentAction): StreamState {
+  // 🔄 REDUCER: every action that reaches React is logged here
+  if (action.type === 'TOKENS_BATCH') {
+    console.log(
+      '%c🔄 REDUCER action', 'color:#a78bfa;font-weight:bold',
+      `TOKENS_BATCH — ${action.tokens.length} token(s): "${action.tokens.map(t=>t.text).join('')}"`,
+      `| phase: ${state.phase} | segments: ${state.segments.length}`
+    );
+  } else {
+    console.log(
+      '%c🔄 REDUCER action', 'color:#a78bfa;font-weight:bold',
+      action.type,
+      `| phase: ${state.phase} → ?`,
+      action
+    );
+  }
+
   switch (action.type) {
 
     // ── User sends a new message — full reset ──────────────────────────────
@@ -129,6 +145,13 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
         : state.phase === 'TOOL_PENDING'
           ? state.phase   // tool card still open — don't change phase
           : 'STREAMING';
+      // 📝 SEGMENT UPDATE: shows content growing in the active TextSegment
+      const activeText = lastSeg?.type === 'text' ? lastSeg.content : '(no text seg)';
+      console.log(
+        '%c📝 TEXT SEGMENT now:', 'color:#34d399;font-weight:bold',
+        `"${activeText.slice(-60)}"`,
+        `| total chars: ${activeText.length} | segments: ${segments.length}`
+      );
       return {
         ...state,
         phase: nextPhase,
@@ -147,8 +170,12 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
       // replayed TOOL_CALL passes dedup and reaches the reducer again. Without this
       // check we'd push a second ToolSegment with the same callId.
       if (state.segments.some(seg => seg.type === 'tool' && (seg as ToolSegment).callId === action.callId)) {
+        console.log('%c🔧 REDUCER: TOOL_CALL idempotent skip', 'color:#94a3b8',
+          `callId=${action.callId} already in segments — replay dedup`);
         return state;
       }
+      console.log('%c🔧 REDUCER: TOOL_CALL', 'color:#f59e0b;font-weight:bold',
+        `→ phase: TOOL_PENDING | pushing ToolSegment id=${action.callId} tool=${action.toolName}`);
       const toolSeg: ToolSegment = {
         type: 'tool',
         id: action.callId,
@@ -173,6 +200,8 @@ function streamReducer(state: StreamState, action: AgentAction): StreamState {
 
     // ── Tool result arrived — resolve the card, ready for more tokens ──────
     case 'TOOL_RESULT': {
+      console.log('%c✅ REDUCER: TOOL_RESULT', 'color:#22c55e;font-weight:bold',
+        `call_id=${action.callId} — ToolCard status: pending→resolved`);
       const segments = state.segments.map((seg): Segment => {
         if (seg.type === 'tool' && seg.callId === action.callId) {
           return { ...seg, status: 'resolved', result: action.result };

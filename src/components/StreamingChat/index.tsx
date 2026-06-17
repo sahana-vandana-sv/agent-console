@@ -1,5 +1,6 @@
 'use client';
 
+import { useRef } from 'react';
 import type { Segment } from '../../types/state';
 import { TextChunk } from './TextChunk';
 import { ToolCard } from './ToolCard';
@@ -14,6 +15,16 @@ interface Props {
 }
 
 export function StreamingChat({ segments, phase, activeSegmentId, onSegmentFocus }: Props) {
+  // 💬 STREAMING CHAT RENDER — logs every time the parent re-renders this component
+  const renderCount = useRef(0);
+  renderCount.current += 1;
+  const textSegs  = segments.filter(s => s.type === 'text').length;
+  const toolSegs  = segments.filter(s => s.type === 'tool').length;
+  console.log(
+    '%c💬 StreamingChat RENDER', 'color:#818cf8;font-weight:bold',
+    `render#${renderCount.current} | phase=${phase} | segments=${segments.length} (${textSegs} text, ${toolSegs} tool)`
+  );
+
   // Scroll is owned by page.tsx — the bottomRef lives inside the overflow-y-auto
   // container there. A second scrollIntoView here would fire simultaneously on every
   // TOKENS_BATCH dispatch, creating two competing smooth-scroll animations per frame.

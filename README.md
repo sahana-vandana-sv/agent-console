@@ -1,3 +1,15 @@
+## Live Demo
+
+- **Frontend (Vercel):** https://agent-console-rho.vercel.app/
+- **Backend (Render, normal mode):** https://agent-console-s65e.onrender.com
+  - Health: https://agent-console-s65e.onrender.com/health
+  - Protocol log: https://agent-console-s65e.onrender.com/log
+  - Reset session: https://agent-console-s65e.onrender.com/reset
+
+> The backend runs on Render's free tier and sleeps after ~15 minutes of inactivity. Open the `/health` link first and wait for it to respond (can take up to a minute) before using the console. The server is single-session, so only one browser tab should be connected at a time.
+
+---
+
 ## Architecture
 
 The app is built around a strict three-layer separation: a pure TypeScript AgentProtocol class, a useReducer hook runs a typed state machine that translates protocol events into render state, and React components are purely read-only renderers.

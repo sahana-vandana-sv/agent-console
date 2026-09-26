@@ -4,7 +4,9 @@ import type { AgentAction } from '../types/state';
 import { createSeqBuffer } from './seqBuffer';
 import { unsafeJsonParse } from './escape-hatch';
 
-const WS_URL            = 'ws://localhost:4747/ws';
+// Inlined at build time. Set NEXT_PUBLIC_WS_URL (wss://…) for deployed builds —
+// an https page cannot open a plain ws:// connection.
+const WS_URL            = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:4747/ws';
 const BACKOFF           = [500, 1000, 2000, 4000, 10000] as const;
 const GAP_TIMEOUT_MS    = 3000;
 // After RESUME, the server replays history but never continues execution.

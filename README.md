@@ -55,7 +55,9 @@ npm run start
 
 Open **http://localhost:3000**
 
-No environment variables required. WebSocket URL defaults to `ws://localhost:4747/ws`.
+No environment variables required locally. WebSocket URL defaults to `ws://localhost:4747/ws`.
+
+For a deployed build, set `NEXT_PUBLIC_WS_URL` to the hosted agent server (e.g. `wss://agent-server.onrender.com/ws`). It is inlined at build time, so changing it requires a rebuild. The page is served over HTTPS, so the URL must use `wss://`.
 
 ---
 
